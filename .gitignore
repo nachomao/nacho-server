@@ -1,0 +1,10 @@
+node_modules
+dist
+*.log
+
+# 运行时数据与密钥
+data/
+.env
+.env.local
+tmp-*.db*
+tmp-script-check/

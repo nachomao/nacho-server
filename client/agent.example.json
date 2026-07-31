@@ -1,0 +1,21 @@
+{
+  "serverUrl": "http://127.0.0.1:8443",
+  "name": "WINDOWS-AGENT",
+  "group": "默认分组",
+  "tags": [],
+  "heartbeatSeconds": 20,
+  "pollSeconds": 15,
+  "defaultExecutionSeconds": 300,
+  "maxExecutionSeconds": 900,
+  "maxOutputBytes": 1048576,
+  "outputCodePage": 0,
+  "allowSystemRestart": false,
+  "allowLogCollection": false,
+  "allowedServices": [],
+  "allowedProcessPaths": [],
+  "allowedPrograms": [
+    "C:\\Windows\\System32\\hostname.exe",
+    "C:\\Windows\\System32\\whoami.exe",
+    "C:\\Windows\\System32\\ipconfig.exe"
+  ]
+}
