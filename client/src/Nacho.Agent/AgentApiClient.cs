@@ -35,6 +35,7 @@ public sealed class AgentApiClient : IDisposable
             name = string.IsNullOrWhiteSpace(_options.Name) ? Environment.MachineName : _options.Name,
             hostname = Environment.MachineName,
             os = "Windows",
+            osName = OsInfo.DisplayName,
             version = typeof(AgentApiClient).Assembly.GetName().Version?.ToString(3) ?? "1.0.0",
             tags = _options.Tags,
             group = _options.Group,
@@ -51,7 +52,7 @@ public sealed class AgentApiClient : IDisposable
     public async Task HeartbeatAsync(ClientMetrics metrics, CancellationToken cancellationToken)
     {
         using var request = Authorized(HttpMethod.Post, "agent/heartbeat");
-        request.Content = JsonContent.Create(new { metrics, version = AgentUpdater.CurrentVersion });
+        request.Content = JsonContent.Create(new { metrics, version = AgentUpdater.CurrentVersion, osName = OsInfo.DisplayName });
         using var response = await _http.SendAsync(request, cancellationToken);
         await EnsureSuccessAsync(response, cancellationToken);
     }

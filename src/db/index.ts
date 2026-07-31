@@ -30,6 +30,7 @@ export function initSchema() {
       hostname     TEXT NOT NULL DEFAULT '',
       ip           TEXT NOT NULL DEFAULT '',
       os           TEXT NOT NULL DEFAULT 'Linux',
+      os_name      TEXT NOT NULL DEFAULT '',
       status       TEXT NOT NULL DEFAULT 'offline',
       tags         TEXT NOT NULL DEFAULT '[]',
       grp          TEXT NOT NULL DEFAULT '默认分组',
@@ -129,5 +130,15 @@ export function initSchema() {
       value TEXT NOT NULL
     );
   `)
+  // 旧库补列：CREATE TABLE IF NOT EXISTS 不会为已存在的表添加新字段
+  ensureColumn("clients", "os_name", "TEXT NOT NULL DEFAULT ''")
   logger.info("数据库结构已初始化：", config.databasePath)
+}
+
+/** 幂等地为已存在的表补充列 */
+function ensureColumn(table: string, column: string, definition: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
+  if (cols.some((c) => c.name === column)) return
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+  logger.info(`数据库已补充字段：${table}.${column}`)
 }

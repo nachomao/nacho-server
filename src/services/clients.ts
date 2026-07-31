@@ -11,6 +11,7 @@ type ClientRow = {
   hostname: string
   ip: string
   os: string
+  os_name: string | null
   status: string
   tags: string
   grp: string
@@ -28,6 +29,7 @@ function mapClient(r: ClientRow): Client {
     hostname: r.hostname,
     ip: r.ip,
     os: r.os as ClientOS,
+    osName: r.os_name ?? "",
     status: computeStatus(r),
     tags: parseArr(r.tags),
     group: r.grp,
@@ -73,6 +75,8 @@ export type RegisterInput = {
   hostname?: string
   ip?: string
   os?: ClientOS
+  /** 具体系统名，Windows 上报版本描述，Linux 上报 /etc/os-release 的 ID */
+  osName?: string
   version?: string
   tags?: string[]
   group?: string
@@ -92,7 +96,7 @@ export function registerClient(input: RegisterInput): { client: Client; token: s
   if (existing) {
     const token = existing.token || makeToken()
     db.prepare(
-      `UPDATE clients SET name=@name, hostname=@hostname, ip=@ip, os=@os, version=@version,
+      `UPDATE clients SET name=@name, hostname=@hostname, ip=@ip, os=@os, os_name=@osName, version=@version,
        tags=@tags, grp=@grp, token=@token, status='online', last_seen=@now WHERE id=@id`,
     ).run({
       id: existing.id,
@@ -100,6 +104,7 @@ export function registerClient(input: RegisterInput): { client: Client; token: s
       hostname: input.hostname ?? existing.hostname,
       ip: input.ip ?? existing.ip,
       os: input.os ?? existing.os,
+      osName: input.osName ?? existing.os_name ?? "",
       version: input.version ?? existing.version,
       tags: JSON.stringify(input.tags ?? parseArr(existing.tags)),
       grp: input.group ?? existing.grp,
@@ -113,14 +118,15 @@ export function registerClient(input: RegisterInput): { client: Client; token: s
   const id = shortId("cl")
   const token = makeToken()
   db.prepare(
-    `INSERT INTO clients (id, name, hostname, ip, os, status, tags, grp, version, token, last_seen, registered_at, metrics)
-     VALUES (@id, @name, @hostname, @ip, @os, 'online', @tags, @grp, @version, @token, @now, @now, NULL)`,
+    `INSERT INTO clients (id, name, hostname, ip, os, os_name, status, tags, grp, version, token, last_seen, registered_at, metrics)
+     VALUES (@id, @name, @hostname, @ip, @os, @osName, 'online', @tags, @grp, @version, @token, @now, @now, NULL)`,
   ).run({
     id,
     name: input.name,
     hostname: input.hostname ?? "",
     ip: input.ip ?? "",
     os: input.os ?? "Linux",
+    osName: input.osName ?? "",
     tags: JSON.stringify(input.tags ?? []),
     grp: input.group ?? "默认分组",
     version: input.version ?? "",
@@ -132,17 +138,19 @@ export function registerClient(input: RegisterInput): { client: Client; token: s
 }
 
 /** 客户端心跳/状态上报 */
-export function heartbeat(id: string, metrics?: ClientMetrics, ip?: string, version?: string): Client | null {
+export function heartbeat(id: string, metrics?: ClientMetrics, ip?: string, version?: string, osName?: string): Client | null {
   const row = db.prepare("SELECT id FROM clients WHERE id = ?").get(id) as { id: string } | undefined
   if (!row) return null
   db.prepare(
-    "UPDATE clients SET last_seen = @now, status = 'online', metrics = @metrics, ip = COALESCE(@ip, ip), version = COALESCE(@version, version) WHERE id = @id",
+    `UPDATE clients SET last_seen = @now, status = 'online', metrics = @metrics, ip = COALESCE(@ip, ip),
+     version = COALESCE(@version, version), os_name = COALESCE(@osName, os_name) WHERE id = @id`,
   ).run({
     id,
     now: Date.now(),
     metrics: metrics ? JSON.stringify(metrics) : null,
     ip: ip ?? null,
     version: version ?? null,
+    osName: osName ?? null,
   })
   return getClient(id)
 }

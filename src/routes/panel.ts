@@ -43,6 +43,7 @@ const clientCreateSchema = z.object({
   hostname: z.string().optional(),
   ip: z.string().optional(),
   os: z.enum(["Windows", "macOS", "Linux"]).optional(),
+  osName: z.string().max(120).optional(),
   version: z.string().optional(),
   tags: z.array(z.string()).optional(),
   group: z.string().optional(),

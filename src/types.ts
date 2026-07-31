@@ -12,6 +12,8 @@ export type Client = {
   hostname: string
   ip: string
   os: ClientOS
+  /** 客户端上报的具体系统名（如 "Windows 11 Pro" / "ubuntu"），未上报时为空串 */
+  osName: string
   status: ClientStatus
   tags: string[]
   group: string

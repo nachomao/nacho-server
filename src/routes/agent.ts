@@ -24,6 +24,8 @@ const enrollSchema = z.object({
   name: z.string().min(1),
   hostname: z.string().optional(),
   os: z.enum(["Windows", "macOS", "Linux"]).optional(),
+  /** 具体系统名：Windows 上报版本描述，Linux 上报 /etc/os-release 的 ID */
+  osName: z.string().max(120).optional(),
   version: z.string().optional(),
   tags: z.array(z.string()).optional(),
   group: z.string().optional(),
@@ -42,6 +44,7 @@ agentRouter.post(
       hostname: body.hostname,
       ip: clientIp(req),
       os: body.os,
+      osName: body.osName,
       version: body.version,
       tags: body.tags,
       group: body.group,
@@ -56,6 +59,7 @@ agentRouter.use(agentAuth)
 
 const metricsSchema = z.object({
   version: z.string().optional(),
+  osName: z.string().max(120).optional(),
   metrics: z
     .object({
       cpu: z.number(),
@@ -71,7 +75,7 @@ agentRouter.post(
   asyncHandler((req, res) => {
     const clientId = (req as Request & { clientId: string }).clientId
     const body = parseBody(metricsSchema, req.body ?? {})
-    const c = clients.heartbeat(clientId, body.metrics, clientIp(req), body.version)
+    const c = clients.heartbeat(clientId, body.metrics, clientIp(req), body.version, body.osName)
     if (!c) return fail(res, "客户端不存在", 404)
     // 心跳响应带上待执行指令数，客户端可据此决定是否立即拉取
     const pending = commands.listCommands(clientId).filter((cmd) => cmd.status === "pending").length
