@@ -11,6 +11,8 @@ import * as plugins from "../services/plugins"
 import * as settings from "../services/settings"
 import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
+import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
+import * as managedArtifacts from "../services/managed-artifacts"
 
 export const panelRouter = Router()
 
@@ -83,20 +85,212 @@ panelRouter.delete(
   }),
 )
 
-// 面板直接向某客户端下发一次性指令
-const commandSchema = z.object({
-  type: z.string().min(1),
-  payload: z.record(z.unknown()).optional(),
-})
-
 panelRouter.post(
   "/clients/:id/commands",
   asyncHandler((req, res) => {
     const c = clients.getClient(req.params.id)
     if (!c) return fail(res, "客户端不存在", 404)
-    const body = parseBody(commandSchema, req.body)
-    if (body.type === "update-agent") return fail(res, "update-agent must be created through /agent-updates", 400)
-    return ok(res, commands.dispatchCommand({ clientId: c.id, type: body.type, payload: body.payload }), 201)
+    const body = parseBody(panelCommandSchema, req.body)
+    if (body.type === "install-package") return fail(res, "install-package 必须通过软件包部署接口创建", 400)
+    if (body.type === "deploy-file" || body.type === "rollback-file-deploy") {
+      return fail(res, `${body.type} 必须通过文件部署专用接口创建`, 400)
+    }
+    if (!commandSupportsClient(body.type, c.os)) {
+      return fail(res, "该命令仅支持 Windows 客户端", 400)
+    }
+    if (body.type === "open-url" && c.status !== "online") {
+      return fail(res, "打开网页仅支持当前在线的 Windows 客户端", 400)
+    }
+    return ok(res, commands.dispatchCommand({ clientId: c.id, type: body.type, payload: addServerCommandFields(body.type, body.payload) }), 201)
+  }),
+)
+
+const cleanText = (maximum: number) => z.string().trim().min(1).max(maximum).refine(
+  (value) => ![...value].some((character) => {
+    const code = character.codePointAt(0) ?? 0
+    return code === 0 || code < 32 || code === 127
+  }),
+  "contains control characters",
+)
+const artifactFileName = z.string().min(1).max(255).refine(
+  (value) => !/[\\/\0-\x1f\x7f]/.test(value) && value !== "." && value !== "..",
+  "invalid file name",
+)
+const packageArgument = z.string().max(4096).refine(
+  (value) => !/[\0-\x1f\x7f]/.test(value),
+  "contains control characters",
+)
+const successExitCodes = z.array(z.number().int().min(0).max(65_535)).min(1).max(32).refine(
+  (value) => new Set(value).size === value.length,
+  "must be unique",
+)
+const packageArtifactSchema = z.object({
+  kind: z.literal("package"),
+  displayName: cleanText(120),
+  version: z.string().trim().max(64).refine((value) => !/[\0-\x1f\x7f]/.test(value), "contains control characters"),
+  originalFileName: artifactFileName,
+  sizeBytes: z.number().int().positive().max(managedArtifacts.MAX_PACKAGE_BYTES),
+  installerType: z.enum(["msi", "exe"]),
+  arguments: z.array(packageArgument).max(64).default([]),
+  successExitCodes: successExitCodes.optional(),
+}).strict().superRefine((value, context) => {
+  if (!value.originalFileName.toLowerCase().endsWith(`.${value.installerType}`)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["originalFileName"], message: "extension must match installerType" })
+  }
+  if (value.installerType === "msi") {
+    value.arguments.forEach((argument, index) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*=.+$/.test(argument)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["arguments", index], message: "MSI arguments must be PROPERTY=value" })
+      }
+    })
+    if (value.successExitCodes && (!value.successExitCodes.includes(0) || !value.successExitCodes.includes(3010))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["successExitCodes"], message: "MSI success codes must include 0 and 3010" })
+    }
+  } else if (value.successExitCodes && !value.successExitCodes.includes(0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["successExitCodes"], message: "EXE success codes must include 0" })
+  }
+})
+const fileArtifactSchema = z.object({
+  kind: z.literal("file"),
+  displayName: cleanText(120),
+  version: z.string().trim().max(64).default(""),
+  originalFileName: artifactFileName,
+  sizeBytes: z.number().int().positive().max(managedArtifacts.MAX_FILE_BYTES),
+}).strict()
+const createArtifactSchema = z.union([packageArtifactSchema, fileArtifactSchema])
+
+panelRouter.get(
+  "/managed-artifacts",
+  asyncHandler((req, res) => {
+    const kind = req.query.kind === "package" || req.query.kind === "file" ? req.query.kind : undefined
+    return ok(res, managedArtifacts.listManagedArtifacts(kind))
+  }),
+)
+
+panelRouter.post(
+  "/managed-artifacts",
+  asyncHandler((req, res) => {
+    const body = parseBody(createArtifactSchema, req.body)
+    return ok(res, managedArtifacts.createManagedArtifact(body), 201)
+  }),
+)
+
+panelRouter.put(
+  "/managed-artifacts/:id/content",
+  asyncHandler(async (req, res) => {
+    if (req.header("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/octet-stream") {
+      return fail(res, "制品内容必须使用 application/octet-stream", 415)
+    }
+    const rawLength = req.header("content-length")
+    const contentLength = rawLength && /^\d+$/.test(rawLength) ? Number(rawLength) : null
+    return ok(res, await managedArtifacts.uploadManagedArtifact(req.params.id, req, contentLength))
+  }),
+)
+
+panelRouter.delete(
+  "/managed-artifacts/:id",
+  asyncHandler(async (req, res) => {
+    if (!await managedArtifacts.deleteManagedArtifact(req.params.id)) return fail(res, "制品不存在", 404)
+    return ok(res, { id: req.params.id })
+  }),
+)
+
+const packageDeploymentSchema = z.object({
+  artifactIds: z.array(z.string().regex(/^artifact-[a-f0-9]{12}$/)).min(1).max(50),
+  clientIds: z.array(z.string().min(1)).min(1).max(100),
+  timeoutSeconds: z.number().int().min(60).max(7200).default(1800),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.artifactIds).size !== value.artifactIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["artifactIds"], message: "must be unique" })
+  }
+  if (new Set(value.clientIds).size !== value.clientIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["clientIds"], message: "must be unique" })
+  }
+})
+
+panelRouter.post(
+  "/package-deployments",
+  asyncHandler((req, res) => {
+    const body = parseBody(packageDeploymentSchema, req.body)
+    return ok(res, managedArtifacts.createPackageDeployment(body.artifactIds, body.clientIds, body.timeoutSeconds ?? 1800), 201)
+  }),
+)
+
+const fileDeploymentSchema = z.object({
+  artifactId: z.string().regex(/^artifact-[a-f0-9]{12}$/),
+  clientIds: z.array(z.string().min(1)).min(1).max(100),
+  destinationPath: z.string().min(3).max(32_767).refine(
+    (value) => /^[A-Za-z]:\\[^\0-\x1f\x7f]*$/.test(value),
+    "destinationPath must be an absolute local Windows path",
+  ),
+  conflictPolicy: z.enum(["fail", "replace"]).default("fail"),
+  createDirectories: z.boolean().default(false),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.clientIds).size !== value.clientIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["clientIds"], message: "must be unique" })
+  }
+})
+
+panelRouter.post(
+  "/file-deployments",
+  asyncHandler((req, res) => {
+    const body = parseBody(fileDeploymentSchema, req.body)
+    return ok(res, managedArtifacts.createFileDeployment(
+      body.artifactId,
+      body.clientIds,
+      body.destinationPath,
+      body.conflictPolicy ?? "fail",
+      body.createDirectories ?? false,
+    ), 201)
+  }),
+)
+
+panelRouter.post(
+  "/clients/:clientId/file-deployments/:commandId/rollback",
+  asyncHandler((req, res) => ok(res, managedArtifacts.createFileDeploymentRollback(
+    req.params.clientId,
+    req.params.commandId,
+  ), 201)),
+)
+
+panelRouter.get(
+  "/deployment-batches",
+  asyncHandler((req, res) => {
+    const kind = req.query.kind === "package" || req.query.kind === "file" ? req.query.kind : undefined
+    const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 20
+    return ok(res, managedArtifacts.listDeploymentBatches(kind, Number.isFinite(limit) ? limit : 20))
+  }),
+)
+
+panelRouter.get(
+  "/deployment-batches/:id",
+  asyncHandler((req, res) => {
+    const batch = managedArtifacts.getDeploymentBatch(req.params.id)
+    return batch ? ok(res, batch) : fail(res, "部署批次不存在", 404)
+  }),
+)
+
+panelRouter.post(
+  "/commands/batch",
+  asyncHandler((req, res) => {
+    const body = parseBody(batchCommandSchema, req.body)
+    const targets = body.clientIds.map((id) => clients.getClient(id))
+    const missing = body.clientIds.filter((_id, index) => !targets[index])
+    if (missing.length > 0) return fail(res, "部分客户端不存在", 404, { clientIds: missing })
+    const nonWindows = targets.filter((client) => client?.os !== "Windows").map((client) => client?.id)
+    if (nonWindows.length > 0) return fail(res, "批量命令仅支持 Windows 客户端", 400, { clientIds: nonWindows })
+    if (body.type === "open-url") {
+      const offline = targets.filter((client) => client?.status !== "online").map((client) => client?.id)
+      if (offline.length > 0) return fail(res, "打开网页仅支持当前在线的 Windows 客户端", 400, { clientIds: offline })
+    }
+    const expiresBase = Date.now()
+    const created = body.clientIds.map((clientId) => commands.dispatchCommand({
+      clientId,
+      type: body.type,
+      payload: addServerCommandFields(body.type, body.payload, expiresBase),
+    }))
+    logs.recordLog("info", "command", `创建 Windows 批量命令：${body.type}`, `targets=${created.length}`)
+    return ok(res, { commands: created }, 201)
   }),
 )
 

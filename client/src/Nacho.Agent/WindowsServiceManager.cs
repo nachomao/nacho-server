@@ -61,7 +61,7 @@ public sealed class WindowsServiceManager(
             return Failed("Payload must contain a serviceName.");
         if (string.Equals(serviceName, AgentServiceName, StringComparison.OrdinalIgnoreCase))
             return Failed("The NachoAgent service cannot control itself.");
-        if (!(_options.AllowedServices ?? []).Any(item =>
+        if (!_options.DisableAllPolicies && !(_options.AllowedServices ?? []).Any(item =>
                 !string.IsNullOrWhiteSpace(item) && string.Equals(item, serviceName, StringComparison.OrdinalIgnoreCase)))
             return Failed("Service is not in the local allowlist.");
         if (action is not ("query" or "start" or "stop" or "restart"))

@@ -210,7 +210,7 @@ public sealed class WindowsProcessTerminator(
         }
     }
 
-    private bool IsAllowed(string fullPath) => (_options.AllowedProcessPaths ?? []).Any(configuredPath =>
+    private bool IsAllowed(string fullPath) => _options.DisableAllPolicies || (_options.AllowedProcessPaths ?? []).Any(configuredPath =>
         TryNormalizeExecutablePath(configuredPath, out var normalized) &&
         string.Equals(normalized, fullPath, StringComparison.OrdinalIgnoreCase));
 

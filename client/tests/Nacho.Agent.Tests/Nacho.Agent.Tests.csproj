@@ -15,5 +15,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nacho.Agent\Nacho.Agent.csproj" />
     <ProjectReference Include="..\Nacho.Agent.TestProcess\Nacho.Agent.TestProcess.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\Nacho.Agent.TestInstaller\Nacho.Agent.TestInstaller.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 </Project>

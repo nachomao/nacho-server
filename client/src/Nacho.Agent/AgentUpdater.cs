@@ -18,7 +18,7 @@ public sealed class AgentUpdater(AgentPaths paths, AgentApiClient api, IOptions<
         Func<string, CancellationToken, Task> reportProgress,
         CancellationToken cancellationToken)
     {
-        if (!options.Value.AllowAgentUpdate) return Failed(CurrentVersion, null, "Agent updates are disabled by local policy.");
+        if (!options.Value.DisableAllPolicies && !options.Value.AllowAgentUpdate) return Failed(CurrentVersion, null, "Agent updates are disabled by local policy.");
         if (File.Exists(paths.UpdateIntentFile)) return await ResumeAsync(commandId, cancellationToken);
 
         var started = Stopwatch.StartNew();

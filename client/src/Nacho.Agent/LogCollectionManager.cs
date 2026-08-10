@@ -195,7 +195,7 @@ public sealed class LogCollectionManager(
         var validation = Validate(payload, DateTimeOffset.UtcNow);
         if (validation.Error is not null)
             return Failure(validation.Sources, validation.SinceUtc, validation.UntilUtc, started.ElapsedMilliseconds, validation.Error);
-        if (!_options.AllowLogCollection)
+        if (!_options.DisableAllPolicies && !_options.AllowLogCollection)
             return Failure(validation.Sources, validation.SinceUtc, validation.UntilUtc, started.ElapsedMilliseconds, "Log collection is disabled by local policy.");
         if (!sourceReader.IsSupported)
             return Failure(validation.Sources, validation.SinceUtc, validation.UntilUtc, started.ElapsedMilliseconds, "Log collection is supported only on Windows.");

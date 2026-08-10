@@ -7,6 +7,7 @@ import * as clients from "../services/clients"
 import * as commands from "../services/commands"
 import { MAX_COMMAND_RESULT_BYTES } from "../services/commands"
 import * as health from "../services/health"
+import * as managedArtifacts from "../services/managed-artifacts"
 import { recordLog } from "../services/logs"
 
 export const agentRouter = Router()
@@ -56,6 +57,20 @@ agentRouter.post(
 
 /* -------------------- 以下接口需要客户端令牌 -------------------- */
 agentRouter.use(agentAuth)
+
+agentRouter.get(
+  "/managed-artifacts/:artifactId",
+  asyncHandler((req, res) => {
+    const clientId = (req as Request & { clientId: string }).clientId
+    const commandId = typeof req.query.commandId === "string" ? req.query.commandId : ""
+    if (!commandId) return fail(res, "缺少 commandId", 400)
+    const download = managedArtifacts.authorizeManagedArtifactDownload(clientId, req.params.artifactId, commandId)
+    res.setHeader("Content-Type", "application/octet-stream")
+    res.setHeader("Content-Length", String(download.artifact.sizeBytes))
+    res.setHeader("Cache-Control", "no-store")
+    return res.download(download.filePath, download.artifact.originalFileName)
+  }),
+)
 
 const metricsSchema = z.object({
   version: z.string().optional(),

@@ -184,7 +184,7 @@ public sealed class SystemRestartManager(
     {
         var validation = Validate(payload);
         if (validation.Error is not null) return Failed(validation.DelaySeconds, validation.Reason, null, null, null, validation.Error);
-        if (!_options.AllowSystemRestart)
+        if (!_options.DisableAllPolicies && !_options.AllowSystemRestart)
             return Failed(validation.DelaySeconds, validation.Reason, null, null, null, "System restart is disabled by local policy.");
         if (!restartController.IsSupported)
             return Failed(validation.DelaySeconds, validation.Reason, null, null, null, "System restart is supported only on Windows.");

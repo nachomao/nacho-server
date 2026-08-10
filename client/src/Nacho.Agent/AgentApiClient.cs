@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 
 namespace Nacho.Agent;
 
-public sealed class AgentApiClient : IDisposable
+public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
 {
     private readonly AgentOptions _options;
     private readonly StateStore _stateStore;
@@ -78,6 +78,42 @@ public sealed class AgentApiClient : IDisposable
             await target.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
         }
         await target.FlushAsync(timeout.Token);
+        return total;
+    }
+
+    public async Task<long> DownloadManagedArtifactAsync(
+        string artifactId,
+        string commandId,
+        string destination,
+        long expectedSize,
+        CancellationToken cancellationToken)
+    {
+        using var request = Authorized(
+            HttpMethod.Get,
+            $"agent/managed-artifacts/{Uri.EscapeDataString(artifactId)}?commandId={Uri.EscapeDataString(commandId)}");
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        await EnsureSuccessAsync(response, cancellationToken);
+        if (response.Content.Headers.ContentLength is long contentLength && contentLength != expectedSize)
+            throw new InvalidDataException("Artifact Content-Length does not match the command payload.");
+        await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
+        await using var target = new FileStream(
+            destination,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            128 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var buffer = new byte[128 * 1024];
+        long total = 0;
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            total += read;
+            if (total > expectedSize) throw new InvalidDataException("Artifact exceeded the declared size.");
+            await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+        }
+        await target.FlushAsync(cancellationToken);
         return total;
     }
 

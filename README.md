@@ -191,6 +191,11 @@ curl -s -X POST $BASE/api/panel/clients/<clientId>/commands \
   -H "authorization: Bearer $PANEL_KEY" -H 'content-type: application/json' \
   -d '{"type":"run-program","payload":{"program":"echo","args":"hi"}}'
 
+# Windows CMD / Windows PowerShell 批量执行；服务端去重并校验所有目标均为 Windows
+curl -s -X POST $BASE/api/panel/commands/batch \
+  -H "authorization: Bearer $PANEL_KEY" -H 'content-type: application/json' \
+  -d '{"clientIds":["<clientId>"],"type":"run-shell","payload":{"shell":"cmd","script":"ver","timeoutSeconds":30}}'
+
 # Windows 服务控制复用同一个通用命令接口；允许列表由目标 Agent 本机配置决定
 curl -s -X POST $BASE/api/panel/clients/<clientId>/commands \
   -H "authorization: Bearer $PANEL_KEY" -H 'content-type: application/json' \
@@ -211,6 +216,11 @@ curl -s -X POST $BASE/api/panel/clients/<clientId>/commands \
   -H "authorization: Bearer $PANEL_KEY" -H 'content-type: application/json' \
   -d '{"type":"collect-logs","payload":{"sources":["agent","system","application"],"sinceUtc":"2026-07-24T07:00:00Z","untilUtc":"2026-07-24T08:00:00Z","maxEntries":200}}'
 
+# Windows 本地账户查询；所有 payload 固定包含 action/userName/groupName
+curl -s -X POST $BASE/api/panel/clients/<clientId>/commands \
+  -H "authorization: Bearer $PANEL_KEY" -H 'content-type: application/json' \
+  -d '{"type":"manage-local-user","payload":{"action":"list","userName":null,"groupName":null}}'
+
 # 3) 客户端拉取待执行指令
 curl -s $BASE/agent/commands/pending -H "authorization: Bearer $TOKEN"
 
@@ -221,6 +231,60 @@ curl -s -X POST $BASE/agent/commands/<cmdId>/report \
 ```
 
 面板前端只需把请求指向本服务端的 `/api/panel/*` 并带上面板 API Key 即可打通全链路。
+
+## Windows 软件仓库与批量安装
+
+- `POST /api/panel/managed-artifacts` 创建 package/file 草稿；`PUT /api/panel/managed-artifacts/:id/content` 要求 `application/octet-stream` 与 `Content-Length`，边读边计算 SHA-256，完成后原子改名为 ready。软件包上限 1 GiB，普通文件上限 512 MiB。
+- `GET /api/panel/managed-artifacts` 读取仓库；`DELETE /api/panel/managed-artifacts/:id` 在存在 pending/sent/running 命令时返回冲突。终态删除会移除正文并隐藏元数据，但保留 deleted 元数据、命令 payload 和批次历史。
+- `POST /api/panel/package-deployments` 接收无重复的 artifactIds、在线 Windows clientIds 与 60–7200 秒超时，并创建“包数 × 客户端数”的 `install-package` 命令矩阵。
+- `GET /api/panel/deployment-batches/:id` 返回逐项命令、客户端、制品和状态；`GET /api/panel/deployment-batches?kind=package&limit=1` 用于页面刷新后恢复最近批次。
+- `GET /agent/managed-artifacts/:artifactId?commandId=:commandId` 使用设备 token，并同时校验客户端、命令、deployment item、活动命令状态和 ready artifact；公开 `/agent/downloads/windows/*` 仍只服务 Agent 自升级。
+- 增量初始化创建 `managed_artifacts`、`deployment_batches`、`deployment_items`，可在旧库及重复启动上执行。
+- 安装结果和服务日志分离：完整结构化结果只在命令记录中，服务日志仅保存 resultBytes 与 exitCode，不复制参数、包正文或结果正文。
+
+## Windows 文件下发与回滚
+
+- `POST /api/panel/file-deployments` 接收一个 ready file artifact、无重复的在线 Windows `clientIds`、绝对 `destinationPath`、`fail|replace` 冲突策略和 `createDirectories`，为每台目标创建独立 `deploy-file` 命令并写入复用的 deployment batch/item。
+- `deploy-file` payload 严格包含 `artifactId`、`fileName`、`sha256`、`sizeBytes`、`destinationPath`、`conflictPolicy` 和 `createDirectories`；文件上限为 512 MiB。通用命令接口拒绝绕过专用部署入口。
+- Agent 文件下载继续使用 `/agent/managed-artifacts/:artifactId?commandId=...`，同时绑定设备 token、客户端、活动命令、deployment item 和 ready artifact；不复用公开升级下载地址。
+- `POST /api/panel/clients/:clientId/file-deployments/:commandId/rollback` 只接受属于该客户端、状态为 success 且结构化结果声明有效备份的原 `deploy-file`，然后创建严格 `{ originalCommandId }` 的 `rollback-file-deploy`；同一原命令只允许一个活动或成功回滚。
+- 批次通过 `GET /api/panel/deployment-batches?kind=file` 与 `GET /api/panel/deployment-batches/:id` 恢复。文件正文与完整命令结果不复制到服务日志，日志只记录类型、ID、目标数量、字节数、状态和结果字节数。
+
+## Windows 本地用户管理
+
+- `manage-local-user` 只通过单机通用命令入口下发给 Windows 客户端；action 为 `list|enable|disable|delete|add-to-group|remove-from-group`。payload 严格固定为 `action`、`userName`、`groupName` 三个字段：`list` 两个名称均为 `null`，启停/删除的 `groupName` 为 `null`，组操作要求两个名称。
+- 用户名采用 1–20 字符 Windows 本机账户约束，组名采用 1–256 字符本地组约束；拒绝控制字符、域分隔符、歧义名称、多余或缺失字段。服务端拒绝 Linux 目标。
+- `list` 结果包含稳定排序的 `userName`、SID、启用状态、内置账户标记和本地组；写结果包含 action、changed、目标快照和结构化 error。服务端对结果再次执行严格结构校验，并统一限制为 512 KiB UTF-8。
+- 完整账户列表、SID 和组成员关系只保存在命令 result。创建日志只记录 action、客户端和命令 ID；结果日志只记录 action、changed、exitCode 与结果字节数。
+- 面板用户管理使用在线 Windows 单选目标，刷新后从命令历史恢复最近 list；启停和组操作显示确认摘要，删除要求再次输入完整账户名，写操作成功后自动下发新的 list。
+
+## Windows 注册表管理
+
+- `manage-registry` 只通过单机通用命令入口下发给 Windows 客户端，action 为 `list|get|set|delete`；hive 限定 `HKLM|HKU`，view 限定 `registry64|registry32`，禁止 HKCU。payload 始终严格包含 `action`、`hive`、`view`、`subKey`、`valueName`、`valueKind`、`value` 七个字段，不适用字段必须为 `null`。
+- `set` 支持 `string|expandString|dword|qword|multiString|binary`。DWORD 范围为 0..4294967295，QWORD 使用十进制字符串或安全整数并限制在有符号 64 位正数范围；binary 使用规范 Base64。任一值的 JSON 序列化上限为 64 KiB，完整命令结果仍限制为 512 KiB UTF-8。
+- 服务端拒绝控制字符、空/双反斜杠、`.`/`..` 段、错误值类型、多余字段和非 Windows 目标；Agent 再次独立验证。结果 action 必须与原命令一致，success/error 与终态保持一致。
+- 结果中的 `previous` 与 `current` 保留值类型和数据，供面板生成严格的逆向 `set` 或 `delete`；删除仅删除值，不递归删除键。完整值只保存在命令 payload/result，审计日志只记录 action、hive、view、路径 SHA-256 短摘要、changed 和结果字节数。
+- 面板提供在线 Windows 单选、hive/view/subKey、真实值列表、按类型编辑器、Base64 解码字节数、写/删确认、刷新恢复和“回滚上次操作”；长路径和长值只在局部容器滚动。
+
+## Windows 消息推送
+
+- 面板通过 `POST /api/panel/commands/batch` 提交严格的 `show-message` 请求：title 为 1–128 个 Unicode 标量，message 为 1–2000 个标量，severity 为 `info|warning|error`，timeoutSeconds 为 5–300。调用方不得提交 `expiresAt`。
+- 服务端为同一批次生成完全相同的 `expiresAt=创建时间+5分钟`，每台在线 Windows 客户端各创建一条命令；非 Windows、重复 ID、未知字段、控制字符和越界标量均拒绝。
+- 结果严格包含 sessionId、deliveryStatus、responseCode、timedOut、durationMs 和结构化 error，不包含用户名。完整 title/message 只保存在命令 payload，日志仅保存 severity、投递状态、session ID、响应代码与结果字节数。
+- `confirmed|canceled|timed-out` 表示 WTS 原生对话框的投递/响应结果；它只证明 WTSSendMessage 调用及其响应，不证明用户已经阅读或理解正文。expired、无活动会话和 Win32 错误返回结构化失败。
+- 面板提供 Unicode 标量计数、级别、超时、在线 Windows 多选、确认摘要、逐客户端轮询结果和刷新恢复，不把消息草稿写入 settings。
+- Agent 1.1.7 的部署配置默认启用 `allowMessagePush`；首次升级会在 Windows 数据目录中备份原配置并执行一次性迁移，之后由迁移标记保护管理员的后续显式修改。控制服务迁移到独立 Linux 时只需保留/重新注册设备连接，消息推送策略不会因服务端位置变化而恢复为关闭。
+
+## Windows 打开网页
+
+Agent 1.1.16 的测试配置默认设置 `disableAllPolicies:true`，统一绕过本机 allow/deny 门禁，保留协议、payload、过期时间、会话、路径和结果校验。将该字段设为 `false` 后恢复各项旧细粒度策略。
+
+- 面板通过 `POST /api/panel/commands/batch` 提交严格 `open-url` 请求，调用方只传 `url`；服务端拒绝 `expiresAt` 注入，并为同批在线 Windows 目标生成相同的五分钟 UTC 过期时间。
+- URL 最长 2048 字符，必须是带主机的绝对 HTTP/HTTPS URL；控制字符、userinfo、相对地址及 `file:`、`javascript:`、`data:` 等其他协议在面板、服务端和 Agent 三处分别校验。
+- Agent 不再设置打开网页的本机策略门禁；通过三层严格校验的绝对 HTTP/HTTPS URL 会直接进入活动会话解析与启动流程。1.1.15 首次启动会备份现有配置、物理删除旧 `allowOpenUrl`/scheme/host 字段并写幂等迁移标记。
+- Agent 复用活动控制台优先、RDP 稳定回退的 `ActiveUserSessionResolver`，通过 WTS 用户 token、`DuplicateTokenEx`、用户环境块与 `CreateProcessAsUserW` 在 `winsta0\default` 启动系统 `explorer.exe`，URL 作为独立参数传入，不在 Session 0 或 shell 拼接中启动。
+- result 严格包含 `sessionId`、`processStarted`、`pid`、`durationMs`、`expired` 和结构化 `error`。成功文案只表示“已启动浏览器请求”，不代表页面内容已经加载。无活动会话、过期与 Win32 错误均为结构化失败。
+- URL intent 在调用 Win32 前持久化；已进入启动阶段的命令遇到 Agent 重启或重复执行时不再打开同一 URL。服务日志只记录规范化 scheme/host、进程启动摘要和结果字节数，不记录 path、query、fragment 或完整 URL。
 
 ## 客户端已安装但面板未显示
 

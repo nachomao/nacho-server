@@ -73,6 +73,29 @@ irm http://SERVER:PORT/uninstall.ps1 | iex
 & ([scriptblock]::Create((irm http://SERVER:PORT/uninstall.ps1))) -Purge
 ```
 
+## `run-shell` 契约
+
+1.1.16 测试配置默认写入 `disableAllPolicies: true`。该字段只绕过 Agent 本机 allow/deny 门禁，payload、过期时间、路径格式、大小、会话和结果校验仍然执行；删除或设为 `false` 后，各项旧的细粒度策略重新生效。
+
+```json
+{
+  "type": "run-shell",
+  "payload": {
+    "shell": "cmd",
+    "script": "ver",
+    "timeoutSeconds": 30
+  }
+}
+```
+
+- `shell` 只接受 `cmd` 或 `powershell`；脚本必须含非空白内容，长度为 1 至 32,768 个 Unicode 标量，且不得包含 NUL 或换行、制表符以外的控制字符。
+- `timeoutSeconds` 为 1 至 900 的整数。超时后 Agent 终止完整进程树。
+- CMD 写入受保护工作目录中的临时 `.cmd` 后由系统 `cmd.exe` 执行；PowerShell 写入临时 `.ps1` 后由内置 Windows PowerShell 以 `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File` 执行，不拼接额外 shell 参数。
+- stdout 与 stderr 使用 UTF-8 有界采集，完整结果严格保持在 512 KiB UTF-8 内。结果包含 `shell`、`stdout`、`stderr`、`exitCode`、`durationMs`、`timedOut`、`truncated` 与 `error`。
+- `allowCmdExecution` 与 `allowPowerShellExecution` 默认均为 `false`。旧配置缺少字段时仍保持关闭；覆盖升级保留管理员已有配置。
+- 命令继续使用 journal、ACK、串行执行、WebSocket/HTTP 回退和结果重试；Agent 重启时不会重放已经开始的 `run-shell`，而是返回稳定的结构化失败。
+- 面板入口位于“客户端管理 -> 批量操作 -> Windows -> 命令执行”，可受控多选在线 Windows 客户端，并通过 `/api/panel/commands/batch` 为每台客户端创建独立命令。
+
 ## `run-program` 契约
 
 ```json
@@ -196,6 +219,145 @@ irm http://SERVER:PORT/uninstall.ps1 | iex
 
 新安装生成的 `%ProgramData%\Nacho\agent.json` 包含 `"allowLogCollection": false`。真实验收应先验证策略关闭错误，再备份配置并临时开启策略，只选择很短时间窗和少量非敏感事件；完成后恢复原配置并核对 SHA-256。
 
+## `install-package` 契约
+
+```json
+{
+  "type": "install-package",
+  "payload": {
+    "artifactId": "artifact-0123456789ab",
+    "fileName": "package.msi",
+    "sha256": "64-lowercase-hex",
+    "sizeBytes": 123,
+    "installerType": "msi",
+    "arguments": ["PROPERTY=value"],
+    "successExitCodes": [0, 3010],
+    "timeoutSeconds": 1800
+  }
+}
+```
+
+- `allowPackageInstall` 默认 `false`；管理员显式开启并重启 Agent 后才接受安装命令，覆盖升级保留已有值。
+- 软件包只从受设备 token、客户端、commandId 与 artifact 四重绑定的 `/agent/managed-artifacts/:artifactId?commandId=...` 下载；不复用公开 Agent 更新地址。
+- 下载目录为 `%ProgramData%\Nacho\packages\<commandId>\`。Agent 先核对声明大小与 SHA-256，再启动安装器；结束后清理包、intent 和临时文件。
+- MSI 固定调用系统 `msiexec.exe /i <package> /qn /norestart`，仅追加经过校验的 `PROPERTY=value` 数组；成功码固定包含 0 和 3010，3010 返回 `rebootRequired: true`，但 Agent 不主动重启。
+- EXE 直接执行下载文件，参数逐项加入 `ArgumentList`，不拼接 shell 命令；成功码固定包含 0，可由仓库元数据增加其他代码。
+- 安装超时为 60–7200 秒；超时终止完整进程树。结果包含 `phase`、`downloadedBytes`、`hashVerified`、`installerType`、`exitCode`、`rebootRequired`、`durationMs`、`timedOut` 与 `error`。
+- intent 会保存下载、校验、启动和进程身份。下载/校验阶段可在 Agent 重启后重新下载；已经启动的安装器只按 PID、路径和启动时间恢复等待，进程身份丢失时返回“状态未知”，绝不重复启动。
+- 面板入口位于“客户端管理 -> 批量操作 -> Windows -> 批量安装”，软件仓库上传、批次创建、逐客户端进度和刷新恢复均读取真实服务端状态。
+
+## `deploy-file` 与 `rollback-file-deploy` 契约
+
+```json
+{
+  "type": "deploy-file",
+  "payload": {
+    "artifactId": "artifact-0123456789ab",
+    "fileName": "config.json",
+    "sha256": "64-lowercase-hex",
+    "sizeBytes": 123,
+    "destinationPath": "C:\\Deploy\\config.json",
+    "conflictPolicy": "fail",
+    "createDirectories": false
+  }
+}
+```
+
+回滚 payload 严格为 `{ "originalCommandId": "cmd-0123456789ab" }`。未知、重复、缺失或类型错误字段均返回结构化失败。
+
+- `allowedDeployRoots` 默认为空，等价于文件下发关闭；目标必须是允许根目录内部的本地盘绝对文件路径。Agent 拒绝相对路径、UNC、设备路径、通配符、ADS、目录目标、盘符根和目录逃逸，并使用相对路径边界比较防止 `C:\Root2` 命中 `C:\Root`。
+- `fileDeployBackupRetentionDays` 默认为 7。下载先进入 `%ProgramData%\Nacho\file-deployments\<commandId>\`，校验声明大小与 SHA-256 后再写入目标。
+- `fail` 在目标已存在时稳定失败；`replace` 先把旧文件移动到受保护备份，再原子移动已校验文件。父目录仅在 `createDirectories: true` 时创建。
+- intent 保存命令、目标、暂存、备份、前后哈希和阶段。Agent 重启后会重新开始尚未应用的下载、确认已经应用的目标哈希，或恢复备份并返回稳定失败，不重复执行破坏性步骤。
+- 回滚要求备份仍存在且当前目标 SHA-256 仍等于该次下发结果；文件被后续人工修改时拒绝覆盖。成功回滚返回恢复后的 SHA-256，并使备份失效；中断的回滚按 intent 完成或恢复当前文件。
+- `deploy-file` 结果包含下载字节数、哈希状态、目标、冲突策略、替换/备份状态、前后 SHA-256、耗时和净化错误；`rollback-file-deploy` 返回原命令 ID、目标、备份状态、恢复 SHA-256 和错误。服务日志不记录文件正文。
+- 面板入口位于“客户端管理 -> 批量操作 -> Windows -> 文件下发”，提供真实文件选择/拖放、上传进度、在线目标多选、目标路径、目录开关、冲突确认、批次刷新恢复、逐客户端结果及防重复回滚。
+
+## `manage-local-user` 契约
+
+```json
+{
+  "type": "manage-local-user",
+  "payload": {
+    "action": "list",
+    "userName": null,
+    "groupName": null
+  }
+}
+```
+
+- action 仅为 `list`、`enable`、`disable`、`delete`、`add-to-group`、`remove-from-group`。三个 payload 字段始终存在；不适用字段必须为 `null`，未知、重复、缺失、超长、控制字符、域名或歧义名称均失败。
+- Agent 使用 NetAPI/Win32 API 枚举和修改本地 SAM 账户，不启动 PowerShell、cmd 或其他 shell。`list` 不枚举域账户，按账户名稳定排序，并返回 SID、启用状态、内置标记和本地组。
+- `allowLocalUserManagement` 默认 `false`，`allowedLocalUsers` 与 `allowedLocalGroups` 默认空。写操作必须同时命中总开关与大小写不敏感的精确允许项；读取列表不旁路到远程域。
+- RID 500、501、503、504 的内置/系统账户按 SID 保护，不依赖本地化显示名。启用、禁用、加入组、移出组均幂等，重复状态返回 `changed:false`；删除不存在账户同样稳定成功且 `changed:false`。
+- 已进入 running 的删除命令在 Agent 重启后返回 `AGENT_RESTARTED`，不再执行；completed 结果只重试上报。结果严格为 list 的 `accounts` 或写操作的 `target`，并包含 action、changed 和结构化 error，完整 JSON 限制在 512 KiB UTF-8 内。
+- 新安装配置会写入三个策略字段；覆盖升级只更新连接信息并保留现有 `agent.json`。面板不提供创建账户、设置密码或远程改密入口。
+
+## `manage-registry` 契约
+
+```json
+{
+  "type": "manage-registry",
+  "payload": {
+    "action": "set",
+    "hive": "HKLM",
+    "view": "registry64",
+    "subKey": "SOFTWARE\\Vendor\\Product",
+    "valueName": "Enabled",
+    "valueKind": "dword",
+    "value": 1
+  }
+}
+```
+
+- action 仅为 `list|get|set|delete`，七个字段始终存在；list 的三个值字段均为 `null`，get/delete 的 `valueKind` 与 `value` 为 `null`。仅支持 HKLM/HKU 与 Registry32/Registry64，不读取 LocalSystem 的 HKCU。
+- `allowedRegistryPaths` 默认空，等价于注册表功能关闭；条目格式为 `HKLM\...` 或 `HKU\...`。Agent 规范化路径并按完整段做大小写不敏感前缀匹配，拒绝空根、双分隔、父目录段、歧义路径及相邻同名前缀。
+- Agent 直接使用 `Microsoft.Win32.RegistryKey`，不调用 PowerShell、cmd 或 reg.exe。set 可创建允许前缀内的键并在写前读取旧值；delete 只删除值。相同值 set 和删除不存在值返回 `changed:false`。
+- 类型映射为 String、ExpandString、DWord、QWord、MultiString、Binary。字符串拒绝控制字符，DWORD/QWORD 检查范围，binary 检查规范 Base64；执行前后都检查 64 KiB 单值上限，完整结果检查 512 KiB。
+- list/get 返回真实值与类型；set/delete 返回 `previous`、`current`、changed 和结构化 error。running 写操作遇到 Agent 重启时返回稳定失败并停止重放；completed 结果只重试上报。
+- 新安装配置生成 `allowedRegistryPaths: []`；旧配置缺少字段时保持空列表，覆盖升级保留管理员原配置。面板回滚通过普通严格 set/delete 命令完成，不存在专用旁路接口。
+
+## `show-message` 契约
+
+```json
+{
+  "type": "show-message",
+  "payload": {
+    "title": "Test notification",
+    "message": "Synthetic fixture message",
+    "severity": "warning",
+    "timeoutSeconds": 60,
+    "expiresAt": "由服务端生成的 UTC ISO-8601"
+  }
+}
+```
+
+- 从 Agent 1.1.7 起，新安装配置默认写入 `allowMessagePush: true`。1.1.7 首次启动会对既有数据目录执行一次迁移：备份原 `agent.json`、把该字段设为 `true`，并写入 `message-push-policy-v1.migrated.json`；迁移标记存在后不再强制覆盖，管理员后续仍可显式关闭。安装脚本在新装和覆盖部署时都明确启用该字段，迁移服务端并保留 `%ProgramData%\Nacho` 时策略继续有效。
+- `ActiveUserSessionResolver` 只考虑 Active 会话，优先当前活动控制台；控制台缺失时按 session ID 稳定选择活动 RDP 会话。结果和日志不包含用户名。
+- Agent 使用 `WTSSendMessageW` 与 OK/Cancel 原生对话框，根据 severity 映射信息、警告和错误图标。响应映射为 `confirmed`、`canceled` 或 `timed-out`；无会话、策略关闭、过期与 Win32 错误为结构化失败。
+- 投递前写入不含正文的 message intent，投递后标记 delivered。已进入投递的命令在 Agent 重启或重复调用时返回稳定失败，不再弹出同一消息。
+- result 仅包含 `sessionId`、`deliveryStatus`、`responseCode`、`timedOut`、`durationMs` 和 `error`。成功只表示 WTS 投递/响应，不代表用户阅读、理解或接受消息内容。
+- 自动迁移的原配置备份为 `%ProgramData%\Nacho\agent.json.before-message-push-enable.bak`；它继承受保护数据目录的 ACL，可用于精确回滚。配置正文、设备状态和 token 不进入 Agent 日志或面板结果。
+
+## `open-url` 契约
+
+```json
+{
+  "type": "open-url",
+  "payload": {
+    "url": "https://example.com/path",
+    "expiresAt": "由服务端生成的 UTC ISO-8601"
+  }
+}
+```
+
+- URL 为 1–2048 字符的绝对 HTTP/HTTPS 地址，必须带 host 且不得含控制字符或 userinfo；payload 只含 `url` 与服务端生成的 `expiresAt`，未知、缺失或重复字段返回 `INVALID_PAYLOAD`。
+- 打开网页不再设置本机总开关、scheme 允许列表或 host 允许列表；通过严格 payload 校验的绝对 HTTP/HTTPS URL 会直接进入活动用户会话启动流程。
+- Agent 复用 `ActiveUserSessionResolver`，通过 `WTSQueryUserToken`、`DuplicateTokenEx`、`CreateEnvironmentBlock` 和 `CreateProcessAsUserW` 在活动用户桌面启动系统 `explorer.exe`；URL 作为单独参数进入经过 Windows 引号规则编码的命令行，不经过 cmd、PowerShell 或 Session 0。
+- 启动前写入不含 URL 的 `open-url-intents/<commandId>.json`；intent 已存在或 running 命令遇到 Agent 重启时返回稳定失败，避免重复打开。
+- result 仅包含 `sessionId`、`processStarted`、`pid`、`durationMs`、`expired` 与 `error`，不包含用户名、token、环境变量、完整命令行或 URL。`processStarted:true` 只证明浏览器启动请求成功，不声明页面已经加载。
+- 新安装配置不再生成打开网页策略字段；1.1.15 首次启动会备份旧 `agent.json`、物理删除三个遗留字段并写入 `open-url-policy-v1.removed.json`。备份为 `agent.json.before-open-url-policy-removal.bak`，后续启动不会重复迁移。
+
 ## 当前边界
 
-本阶段不包含 Linux、ARM64、MSI、自动升级、用户交互会话、后台分离进程、远程机器重启、关机、休眠、注销、任意文件读取、Security/PowerShell 操作日志、实时订阅、日志删除或导出包；日志采集只覆盖显式开启本机策略的 Windows 目标及三个固定来源。
+当前不包含 Linux/ARM64 包安装、包依赖编排、安装后的自动系统重启、用户交互式安装器、任意脚本安装器、远程机器关机/休眠/注销、任意文件读取、Security/PowerShell 操作日志、实时订阅、日志删除或导出包。

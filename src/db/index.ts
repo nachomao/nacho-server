@@ -77,6 +77,48 @@ export function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_commands_client ON commands(client_id, status);
 
+    CREATE TABLE IF NOT EXISTS managed_artifacts (
+      id                 TEXT PRIMARY KEY,
+      kind               TEXT NOT NULL,
+      display_name       TEXT NOT NULL,
+      version            TEXT NOT NULL DEFAULT '',
+      original_file_name TEXT NOT NULL,
+      storage_name       TEXT NOT NULL UNIQUE,
+      size_bytes         INTEGER NOT NULL,
+      sha256             TEXT,
+      installer_type     TEXT,
+      arguments          TEXT NOT NULL DEFAULT '[]',
+      success_exit_codes TEXT NOT NULL DEFAULT '[0]',
+      status             TEXT NOT NULL DEFAULT 'draft',
+      created_at         INTEGER NOT NULL,
+      updated_at         INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_managed_artifacts_kind_status ON managed_artifacts(kind, status);
+
+    CREATE TABLE IF NOT EXISTS deployment_batches (
+      id          TEXT PRIMARY KEY,
+      kind        TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'pending',
+      total_items INTEGER NOT NULL,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_deployment_batches_kind_created ON deployment_batches(kind, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS deployment_items (
+      id          TEXT PRIMARY KEY,
+      batch_id    TEXT NOT NULL,
+      command_id  TEXT NOT NULL UNIQUE,
+      artifact_id TEXT NOT NULL,
+      client_id   TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      FOREIGN KEY(batch_id) REFERENCES deployment_batches(id),
+      FOREIGN KEY(command_id) REFERENCES commands(id),
+      FOREIGN KEY(artifact_id) REFERENCES managed_artifacts(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_deployment_items_batch ON deployment_items(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_deployment_items_download ON deployment_items(client_id, command_id, artifact_id);
+
     CREATE TABLE IF NOT EXISTS logs (
       id       TEXT PRIMARY KEY,
       ts       INTEGER NOT NULL,

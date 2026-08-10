@@ -27,7 +27,7 @@ public sealed class ProgramExecutor(IOptions<AgentOptions> options, ILogger<Prog
         string fullPath;
         try { fullPath = Path.GetFullPath(program); }
         catch { return Failed("Program path is invalid."); }
-        var allowed = _options.AllowedPrograms.Any(item => IsAllowed(item, fullPath));
+        var allowed = _options.DisableAllPolicies || _options.AllowedPrograms.Any(item => IsAllowed(item, fullPath));
         if (!allowed) return Failed("Program is not in the local allowlist.");
         if (!File.Exists(fullPath)) return Failed("Program does not exist.");
 

@@ -63,6 +63,82 @@ public sealed class UpdateIntent
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+public sealed class PackageInstallIntent
+{
+    public int Version { get; init; } = 1;
+    public required string CommandId { get; init; }
+    public required string ArtifactId { get; init; }
+    public required string FileName { get; init; }
+    public required string Sha256 { get; init; }
+    public required long SizeBytes { get; init; }
+    public required string InstallerType { get; init; }
+    public required string[] Arguments { get; init; }
+    public required int[] SuccessExitCodes { get; init; }
+    public required int TimeoutSeconds { get; init; }
+    public required string PackagePath { get; init; }
+    public required string Phase { get; set; }
+    public long DownloadedBytes { get; set; }
+    public bool HashVerified { get; set; }
+    public int? ProcessId { get; set; }
+    public string? ProcessPath { get; set; }
+    public DateTimeOffset? ProcessStartedAt { get; set; }
+    public int? ExitCode { get; set; }
+    public bool TimedOut { get; set; }
+    public bool RebootRequired { get; set; }
+    public string? Error { get; set; }
+    public long DurationMs { get; set; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class FileDeployIntent
+{
+    public int Version { get; init; } = 1;
+    public required string CommandId { get; init; }
+    public required string ArtifactId { get; init; }
+    public required string FileName { get; init; }
+    public required string Sha256 { get; init; }
+    public required long SizeBytes { get; init; }
+    public required string DestinationPath { get; init; }
+    public required string ConflictPolicy { get; init; }
+    public required bool CreateDirectories { get; init; }
+    public required string TemporaryPath { get; init; }
+    public string? BackupPath { get; init; }
+    public string? PreviousSha256 { get; set; }
+    public string? FinalSha256 { get; set; }
+    public string Phase { get; set; } = "received";
+    public long DownloadedBytes { get; set; }
+    public bool HashVerified { get; set; }
+    public bool Replaced { get; set; }
+    public bool BackupValid { get; set; }
+    public string? RollbackCommandId { get; set; }
+    public string? RollbackPhase { get; set; }
+    public string? Error { get; set; }
+    public long DurationMs { get; set; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class MessageIntent
+{
+    public int Version { get; init; } = 1;
+    public required string CommandId { get; init; }
+    public required string Phase { get; set; }
+    public uint? SessionId { get; set; }
+    public uint? ResponseCode { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class OpenUrlIntent
+{
+    public int Version { get; init; } = 1;
+    public required string CommandId { get; init; }
+    public required string Phase { get; set; }
+    public uint? SessionId { get; set; }
+    public int? ProcessId { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public sealed record UpdateHealth(string Version, DateTimeOffset HeartbeatAt);
 
 public sealed class RestartIntent
@@ -88,6 +164,10 @@ public sealed class RestartIntent
 [JsonSerializable(typeof(JournalEntry))]
 [JsonSerializable(typeof(RestartIntent))]
 [JsonSerializable(typeof(UpdateIntent))]
+[JsonSerializable(typeof(PackageInstallIntent))]
+[JsonSerializable(typeof(FileDeployIntent))]
+[JsonSerializable(typeof(MessageIntent))]
+[JsonSerializable(typeof(OpenUrlIntent))]
 [JsonSerializable(typeof(UpdateHealth))]
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 internal partial class AgentJsonContext : JsonSerializerContext;

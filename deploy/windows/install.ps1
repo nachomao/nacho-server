@@ -58,6 +58,15 @@ try {
     if (Test-Path $configPath) {
       $config = Get-Content -Raw -Encoding UTF8 $configPath | ConvertFrom-Json
       $config.serverUrl = $ServerUrl
+      $config.disableAllPolicies = $true
+      if ($config.PSObject.Properties.Name -contains 'allowMessagePush') {
+        $config.allowMessagePush = $true
+      } else {
+        $config | Add-Member -NotePropertyName allowMessagePush -NotePropertyValue $true
+      }
+      foreach ($legacyOpenUrlPolicyField in @('allowOpenUrl', 'allowedUrlSchemes', 'allowedUrlHosts')) {
+        $config.PSObject.Properties.Remove($legacyOpenUrlPolicyField)
+      }
     } else {
       $config = [ordered]@{
         serverUrl = $ServerUrl
@@ -69,7 +78,18 @@ try {
         defaultExecutionSeconds = 300
         maxExecutionSeconds = 900
         maxOutputBytes = 1048576
+        disableAllPolicies = $true
         outputCodePage = 0
+        allowCmdExecution = $false
+        allowPowerShellExecution = $false
+        allowPackageInstall = $false
+        allowLocalUserManagement = $false
+        allowedLocalUsers = @()
+        allowedLocalGroups = @()
+        allowedRegistryPaths = @()
+        allowMessagePush = $true
+        allowedDeployRoots = @()
+        fileDeployBackupRetentionDays = 7
         allowSystemRestart = $false
         allowLogCollection = $false
         allowedServices = @()

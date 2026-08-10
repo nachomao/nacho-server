@@ -21,20 +21,30 @@ public static class OsInfo
             var product = key?.GetValue("ProductName") as string;
             var displayVersion = key?.GetValue("DisplayVersion") as string;
             var build = Environment.OSVersion.Version.Build;
-
-            if (string.IsNullOrWhiteSpace(product))
-                return build >= Windows11MinimumBuild ? "Windows 11" : "Windows";
-
-            // Windows 11 的 ProductName 仍为 "Windows 10 ..."，按内部版本号替换前缀
-            if (build >= Windows11MinimumBuild && product.Contains("Windows 10", StringComparison.OrdinalIgnoreCase))
-                product = product.Replace("Windows 10", "Windows 11", StringComparison.OrdinalIgnoreCase);
-
-            return string.IsNullOrWhiteSpace(displayVersion) ? product : $"{product} {displayVersion}";
+            return NormalizeDisplayName(product, displayVersion, build);
         }
         catch (Exception)
         {
             // 注册表不可读时退回到内部版本号判断，避免影响注册与心跳
-            return Environment.OSVersion.Version.Build >= Windows11MinimumBuild ? "Windows 11" : "Windows";
+            return NormalizeDisplayName(null, null, Environment.OSVersion.Version.Build);
         }
+    }
+
+    /// <summary>根据注册表名称与内部构建号生成稳定的展示名称。</summary>
+    internal static string NormalizeDisplayName(string? product, string? displayVersion, int build)
+    {
+        var normalizedProduct = product?.Trim();
+        var normalizedDisplayVersion = displayVersion?.Trim();
+
+        if (string.IsNullOrWhiteSpace(normalizedProduct))
+            return build >= Windows11MinimumBuild ? "Windows 11" : "Windows";
+
+        // Windows 11 的 ProductName 仍可能写作 "Windows 10 ..."，必须以内核构建号为准。
+        if (build >= Windows11MinimumBuild && normalizedProduct.Contains("Windows 10", StringComparison.OrdinalIgnoreCase))
+            normalizedProduct = normalizedProduct.Replace("Windows 10", "Windows 11", StringComparison.OrdinalIgnoreCase);
+
+        return string.IsNullOrWhiteSpace(normalizedDisplayVersion)
+            ? normalizedProduct
+            : $"{normalizedProduct} {normalizedDisplayVersion}";
     }
 }

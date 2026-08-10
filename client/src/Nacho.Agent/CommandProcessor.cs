@@ -7,10 +7,17 @@ public sealed class CommandProcessor(
     CommandJournal journal,
     AgentApiClient api,
     ProgramExecutor executor,
+    ShellCommandExecutor shellExecutor,
+    PackageInstallManager packageInstallManager,
+    FileDeploymentManager fileDeploymentManager,
     WindowsServiceManager serviceManager,
     WindowsProcessTerminator processTerminator,
     SystemRestartManager restartManager,
     LogCollectionManager logCollectionManager,
+    LocalUserManager localUserManager,
+    RegistryManager registryManager,
+    MessagePushManager messagePushManager,
+    OpenUrlManager openUrlManager,
     AgentUpdater agentUpdater,
     ILogger<CommandProcessor> logger) : BackgroundService
 {
@@ -18,6 +25,8 @@ public sealed class CommandProcessor(
     private readonly ConcurrentDictionary<string, byte> _queued = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _resumeRestarts = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _resumeUpdates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _resumePackageInstalls = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _resumeFileDeployments = new(StringComparer.Ordinal);
 
     public async Task AcceptAsync(AgentCommand command, CancellationToken cancellationToken)
     {
@@ -69,6 +78,20 @@ public sealed class CommandProcessor(
                 continue;
             }
 
+            if (entry.Command.Type == "install-package")
+            {
+                _resumePackageInstalls.TryAdd(entry.Command.Id, 0);
+                if (_queued.TryAdd(entry.Command.Id, 0)) await _queue.Writer.WriteAsync(entry, cancellationToken);
+                continue;
+            }
+
+            if (entry.Command.Type is "deploy-file" or "rollback-file-deploy")
+            {
+                _resumeFileDeployments.TryAdd(entry.Command.Id, 0);
+                if (_queued.TryAdd(entry.Command.Id, 0)) await _queue.Writer.WriteAsync(entry, cancellationToken);
+                continue;
+            }
+
             entry.State = "completed";
             entry.FinalStatus = "failed";
             entry.Result = entry.Command.Type switch
@@ -76,6 +99,12 @@ public sealed class CommandProcessor(
                 "manage-service" => WindowsServiceManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
                 "terminate-process" => WindowsProcessTerminator.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
                 "collect-logs" => LogCollectionManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
+                "run-shell" => ShellCommandExecutor.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
+                "manage-local-user" => LocalUserManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running; the operation was not replayed."),
+                "manage-registry" => RegistryManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running; the operation was not replayed."),
+                "show-message" => MessagePushManager.ErrorJson("Agent restarted while the message command was running; delivery was not repeated."),
+                "open-url" => OpenUrlManager.ErrorJson("Agent restarted while the URL command was running; browser launch was not repeated."),
+                "install-package" => PackageInstallManager.ErrorJson(entry.Command.Payload, "Package installation state is unknown after Agent restart."),
                 _ => ProgramExecutor.ErrorJson("Agent restarted while the command was running."),
             };
             entry.ExitCode = null;
@@ -113,7 +142,9 @@ public sealed class CommandProcessor(
     {
         var resumingRestart = _resumeRestarts.TryRemove(entry.Command.Id, out _);
         var resumingUpdate = _resumeUpdates.TryRemove(entry.Command.Id, out _);
-        if (!resumingRestart && !resumingUpdate)
+        var resumingPackageInstall = _resumePackageInstalls.TryRemove(entry.Command.Id, out _);
+        var resumingFileDeployment = _resumeFileDeployments.TryRemove(entry.Command.Id, out _);
+        if (!resumingRestart && !resumingUpdate && !resumingPackageInstall && !resumingFileDeployment)
         {
             await api.AcknowledgeAsync(entry.Command.Id, cancellationToken);
             entry.State = "running";
@@ -128,6 +159,28 @@ public sealed class CommandProcessor(
         var execution = entry.Command.Type switch
         {
             "run-program" => await executor.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "run-shell" => await shellExecutor.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "install-package" when resumingPackageInstall => await packageInstallManager.ResumeAsync(
+                entry.Command.Id,
+                entry.Command.Payload,
+                (result, token) => TryReportProgressAsync(entry.Command.Id, result, token),
+                cancellationToken),
+            "install-package" => await packageInstallManager.ExecuteAsync(
+                entry.Command.Id,
+                entry.Command.Payload,
+                (result, token) => TryReportProgressAsync(entry.Command.Id, result, token),
+                cancellationToken),
+            "deploy-file" when resumingFileDeployment => await fileDeploymentManager.ResumeAsync(
+                entry.Command.Id,
+                entry.Command.Payload,
+                (result, token) => TryReportProgressAsync(entry.Command.Id, result, token),
+                cancellationToken),
+            "deploy-file" => await fileDeploymentManager.ExecuteAsync(
+                entry.Command.Id,
+                entry.Command.Payload,
+                (result, token) => TryReportProgressAsync(entry.Command.Id, result, token),
+                cancellationToken),
+            "rollback-file-deploy" => await fileDeploymentManager.RollbackAsync(entry.Command.Id, entry.Command.Payload, cancellationToken),
             "manage-service" => await serviceManager.ExecuteAsync(entry.Command.Payload, cancellationToken),
             "terminate-process" => await processTerminator.ExecuteAsync(entry.Command.Payload, cancellationToken),
             "restart-system" when resumingRestart => await restartManager.ResumeAsync(
@@ -141,6 +194,10 @@ public sealed class CommandProcessor(
                 (result, token) => TryReportProgressAsync(entry.Command.Id, result, token),
                 cancellationToken),
             "collect-logs" => await logCollectionManager.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "manage-local-user" => await localUserManager.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "manage-registry" => await registryManager.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "show-message" => await messagePushManager.ExecuteAsync(entry.Command.Id, entry.Command.Payload, cancellationToken),
+            "open-url" => await openUrlManager.ExecuteAsync(entry.Command.Id, entry.Command.Payload, cancellationToken),
             "update-agent" => await agentUpdater.ExecuteAsync(
                 entry.Command.Id,
                 entry.Command.Payload,
@@ -180,7 +237,7 @@ public sealed class CommandProcessor(
         try { await api.ReportAsync(commandId, "running", result, null, cancellationToken); }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Restart progress report for {CommandId} failed; final result will still be delivered", commandId);
+            logger.LogWarning(ex, "Command progress report for {CommandId} failed; final result will still be delivered", commandId);
         }
     }
 
