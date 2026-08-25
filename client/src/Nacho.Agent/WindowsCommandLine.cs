@@ -23,4 +23,18 @@ internal static class WindowsCommandLine
         }
         finally { LocalFree(pointer); }
     }
+
+    public static string[] SplitFull(string commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine)) return [];
+        var pointer = CommandLineToArgvW(commandLine, out var argc);
+        if (pointer == 0) throw new InvalidDataException("Command line is not valid Windows syntax.");
+        try
+        {
+            var result = new string[argc];
+            for (var index = 0; index < argc; index++) result[index] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(pointer, index * nint.Size)) ?? "";
+            return result;
+        }
+        finally { LocalFree(pointer); }
+    }
 }

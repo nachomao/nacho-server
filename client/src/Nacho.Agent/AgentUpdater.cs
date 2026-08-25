@@ -10,6 +10,8 @@ namespace Nacho.Agent;
 public sealed class AgentUpdater(AgentPaths paths, AgentApiClient api, IOptions<AgentOptions> options, ILogger<AgentUpdater> logger)
 {
     public const long MaximumArtifactBytes = 256L * 1024 * 1024;
+    public const int DefaultUpdateBackupRetentionCount = 2;
+    public const long DefaultUpdateBackupMaxBytes = 1L * 1024 * 1024 * 1024;
     public static string CurrentVersion => typeof(AgentUpdater).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
     public async Task<ExecutionResult> ExecuteAsync(
@@ -230,6 +232,67 @@ public sealed class AgentUpdater(AgentPaths paths, AgentApiClient api, IOptions<
             throw new IOException("Insufficient free space for artifact, backup, and 100 MiB reserve.");
     }
 
+    /// <summary>
+    /// 清理历史版本更新目录。仅处理明确命名为 update-/failed-update- 的一级目录，
+    /// 按最近写入时间保留，并同时满足数量和总容量上限。删除失败的目录留待下一次启动重试。
+    /// </summary>
+    public static BackupCleanupResult CleanupHistoricalBackups(string root, int retentionCount = DefaultUpdateBackupRetentionCount, long maxBytes = DefaultUpdateBackupMaxBytes)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return new(0, 0, 0, 0);
+        retentionCount = Math.Clamp(retentionCount, 0, 100);
+        maxBytes = Math.Max(0, maxBytes);
+
+        var candidates = Directory.EnumerateDirectories(root)
+            .Select(path => new DirectoryInfo(path))
+            .Where(directory => directory.Name.StartsWith("update-", StringComparison.OrdinalIgnoreCase) ||
+                                directory.Name.StartsWith("failed-update-", StringComparison.OrdinalIgnoreCase))
+            .Select(directory =>
+            {
+                long bytes = 0;
+                try { bytes = directory.EnumerateFiles("*", SearchOption.AllDirectories).Sum(file => file.Length); } catch { }
+                return new BackupDirectory(directory, bytes);
+            })
+            .OrderByDescending(item => item.Directory.LastWriteTimeUtc)
+            .ThenByDescending(item => item.Directory.Name, StringComparer.Ordinal)
+            .ToList();
+
+        var totalBytes = candidates.Sum(item => item.Bytes);
+        var keepSet = candidates.Take(retentionCount).ToList();
+        var keptBytes = keepSet.Sum(item => item.Bytes);
+        while (keepSet.Count > 0 && keptBytes > maxBytes)
+        {
+            var oldestKept = keepSet[^1];
+            keepSet.RemoveAt(keepSet.Count - 1);
+            keptBytes -= oldestKept.Bytes;
+        }
+        var keepLookup = keepSet.ToHashSet();
+        var deleted = 0;
+        long deletedBytes = 0;
+        foreach (var candidate in candidates)
+        {
+            if (keepLookup.Contains(candidate)) continue;
+
+            try
+            {
+                candidate.Directory.Delete(true);
+                deleted++;
+                deletedBytes += candidate.Bytes;
+            }
+            catch { /* 下一次启动继续清理，更新流程本身不受影响 */ }
+        }
+
+        return new(candidates.Count, keepSet.Count, deleted, Math.Max(0, totalBytes - deletedBytes));
+    }
+
+    public static string ResolveHistoricalBackupDirectory(string installPath)
+    {
+        var agentDirectory = Directory.GetParent(Path.GetFullPath(installPath))?.FullName;
+        var nachoDirectory = agentDirectory is null ? null : Directory.GetParent(agentDirectory)?.FullName;
+        var programFilesDirectory = nachoDirectory is null ? null : Directory.GetParent(nachoDirectory)?.FullName;
+        return programFilesDirectory is null ? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(installPath))!, "NachoAgentBackups") :
+            Path.Combine(programFilesDirectory, "NachoAgentBackups");
+    }
+
     public static void WriteAtomic<T>(string path, T value, JsonTypeInfo<T> typeInfo)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -249,4 +312,6 @@ public sealed class AgentUpdater(AgentPaths paths, AgentApiClient api, IOptions<
         JsonSerializer.Serialize(new { fromVersion = from, targetVersion = target, phase, downloadedBytes = downloaded, durationMs = duration, rolledBack, rollbackReason, error });
 
     public sealed record UpdateRequest(string TargetVersion, string FileName, string Sha256, long SizeBytes);
+    public sealed record BackupCleanupResult(int Candidates, int Kept, int Deleted, long RemainingBytes);
+    private sealed record BackupDirectory(DirectoryInfo Directory, long Bytes);
 }

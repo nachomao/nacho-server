@@ -69,6 +69,7 @@ public sealed class WindowsProcessTerminator(
         var started = Stopwatch.GetTimestamp();
         var processId = ReadProcessId(payload);
         var expectedPath = ReadString(payload, "expectedPath");
+        DateTimeOffset? expectedStartedAtUtc = null;
         string? actualPath = null;
         var killProcessTree = true;
         var initialStatus = "unknown";
@@ -96,6 +97,14 @@ public sealed class WindowsProcessTerminator(
         expectedPath = normalizedExpectedPath;
         if (!IsAllowed(expectedPath))
             return Failed("Process path is not in the local allowlist.");
+
+        if (payload.TryGetProperty("expectedStartedAtUtc", out var expectedStartedElement))
+        {
+            if (expectedStartedElement.ValueKind != JsonValueKind.String ||
+                !DateTimeOffset.TryParse(expectedStartedElement.GetString(), out var parsedStartedAt))
+                return Failed("expectedStartedAtUtc must be a valid timestamp.");
+            expectedStartedAtUtc = parsedStartedAt.ToUniversalTime();
+        }
 
         var timeoutSeconds = DefaultTimeoutSeconds;
         if (payload.TryGetProperty("timeoutSeconds", out var timeoutElement) &&
@@ -159,6 +168,8 @@ public sealed class WindowsProcessTerminator(
 
             if (initialIdentity.ProcessId != processId.Value)
                 return Failed("Process identity did not match the requested PID.");
+            if (expectedStartedAtUtc is not null && initialIdentity.StartTimeUtc != expectedStartedAtUtc.Value.UtcDateTime)
+                return Failed("Process start time did not match the inventory snapshot.");
             if (!string.Equals(initialIdentity.ImagePath, expectedPath, StringComparison.OrdinalIgnoreCase) || !IsAllowed(initialIdentity.ImagePath))
                 return Failed("Process image path did not match the expected allowlisted path.");
             initialStatus = "running";
@@ -227,7 +238,7 @@ public sealed class WindowsProcessTerminator(
         catch { return false; }
     }
 
-    private static bool TryNormalizeExecutablePath(string? path, out string normalized)
+    internal static bool TryNormalizeExecutablePath(string? path, out string normalized)
     {
         normalized = "";
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) || path.IndexOfAny(['*', '?']) >= 0)

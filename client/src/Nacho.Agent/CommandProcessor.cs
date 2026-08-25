@@ -11,6 +11,8 @@ public sealed class CommandProcessor(
     PackageInstallManager packageInstallManager,
     FileDeploymentManager fileDeploymentManager,
     WindowsServiceManager serviceManager,
+    WindowsProcessInventoryManager processInventoryManager,
+    WindowsProcessActionManager processActionManager,
     WindowsProcessTerminator processTerminator,
     SystemRestartManager restartManager,
     LogCollectionManager logCollectionManager,
@@ -27,6 +29,7 @@ public sealed class CommandProcessor(
     private readonly ConcurrentDictionary<string, byte> _resumeUpdates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _resumePackageInstalls = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _resumeFileDeployments = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _resumeProcessRestarts = new(StringComparer.Ordinal);
 
     public async Task AcceptAsync(AgentCommand command, CancellationToken cancellationToken)
     {
@@ -92,12 +95,22 @@ public sealed class CommandProcessor(
                 continue;
             }
 
+            if (entry.Command.Type == "restart-process" && processActionManager.HasRestartIntent(entry.Command.Id))
+            {
+                _resumeProcessRestarts.TryAdd(entry.Command.Id, 0);
+                if (_queued.TryAdd(entry.Command.Id, 0)) await _queue.Writer.WriteAsync(entry, cancellationToken);
+                continue;
+            }
+
             entry.State = "completed";
             entry.FinalStatus = "failed";
             entry.Result = entry.Command.Type switch
             {
                 "manage-service" => WindowsServiceManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
+                "list-processes" => WindowsProcessInventoryManager.ErrorJson("Agent restarted while the command was running."),
                 "terminate-process" => WindowsProcessTerminator.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
+                "restart-process" => WindowsProcessActionManager.RestartErrorJson(entry.Command.Payload, "Agent restarted without a recoverable restart intent."),
+                "set-process-efficiency" => WindowsProcessActionManager.EfficiencyErrorJson(entry.Command.Payload, "Agent restarted while the efficiency command was running."),
                 "collect-logs" => LogCollectionManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
                 "run-shell" => ShellCommandExecutor.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running."),
                 "manage-local-user" => LocalUserManager.ErrorJson(entry.Command.Payload, "Agent restarted while the command was running; the operation was not replayed."),
@@ -144,7 +157,8 @@ public sealed class CommandProcessor(
         var resumingUpdate = _resumeUpdates.TryRemove(entry.Command.Id, out _);
         var resumingPackageInstall = _resumePackageInstalls.TryRemove(entry.Command.Id, out _);
         var resumingFileDeployment = _resumeFileDeployments.TryRemove(entry.Command.Id, out _);
-        if (!resumingRestart && !resumingUpdate && !resumingPackageInstall && !resumingFileDeployment)
+        var resumingProcessRestart = _resumeProcessRestarts.TryRemove(entry.Command.Id, out _);
+        if (!resumingRestart && !resumingUpdate && !resumingPackageInstall && !resumingFileDeployment && !resumingProcessRestart)
         {
             await api.AcknowledgeAsync(entry.Command.Id, cancellationToken);
             entry.State = "running";
@@ -182,7 +196,11 @@ public sealed class CommandProcessor(
                 cancellationToken),
             "rollback-file-deploy" => await fileDeploymentManager.RollbackAsync(entry.Command.Id, entry.Command.Payload, cancellationToken),
             "manage-service" => await serviceManager.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "list-processes" => await processInventoryManager.ExecuteAsync(entry.Command.Payload, cancellationToken),
             "terminate-process" => await processTerminator.ExecuteAsync(entry.Command.Payload, cancellationToken),
+            "restart-process" when resumingProcessRestart => await processActionManager.ResumeRestartAsync(entry.Command.Id, entry.Command.Payload, cancellationToken),
+            "restart-process" => await processActionManager.RestartAsync(entry.Command.Id, entry.Command.Payload, cancellationToken),
+            "set-process-efficiency" => processActionManager.SetEfficiency(entry.Command.Payload),
             "restart-system" when resumingRestart => await restartManager.ResumeAsync(
                 entry.Command.Id,
                 entry.Command.Payload,

@@ -146,6 +146,7 @@ export function initSchema() {
 
     CREATE TABLE IF NOT EXISTS health_findings (
       id        TEXT PRIMARY KEY,
+      package_id TEXT,
       host      TEXT NOT NULL,
       severity  TEXT NOT NULL DEFAULT 'info',
       category  TEXT NOT NULL DEFAULT '系统日志',
@@ -158,29 +159,91 @@ export function initSchema() {
 
     CREATE TABLE IF NOT EXISTS log_packages (
       id        TEXT PRIMARY KEY,
+      client_id TEXT,
+      command_id TEXT,
       host      TEXT NOT NULL,
       category  TEXT NOT NULL DEFAULT '系统日志',
       size_mb   REAL NOT NULL DEFAULT 0,
       time      TEXT NOT NULL DEFAULT '',
       ts        INTEGER NOT NULL,
       findings  INTEGER NOT NULL DEFAULT 0,
-      status    TEXT NOT NULL DEFAULT 'pending'
+      status    TEXT NOT NULL DEFAULT 'collecting',
+      storage_name TEXT,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT,
+      sources TEXT NOT NULL DEFAULT '[]',
+      entry_count INTEGER NOT NULL DEFAULT 0,
+      truncated INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      analyzed_at INTEGER
     );
-
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS install_profiles (
+      id                         TEXT PRIMARY KEY,
+      name                       TEXT NOT NULL,
+      run_mode                   TEXT NOT NULL DEFAULT 'menu',
+      agent_server_url           TEXT,
+      heartbeat_seconds          INTEGER NOT NULL DEFAULT 20,
+      poll_seconds               INTEGER NOT NULL DEFAULT 15,
+      client_name                TEXT,
+      grp                        TEXT NOT NULL DEFAULT '默认分组',
+      tags                       TEXT NOT NULL DEFAULT '[]',
+      overwrite_existing         INTEGER NOT NULL DEFAULT 0,
+      re_enroll_on_server_change INTEGER NOT NULL DEFAULT 0,
+      is_default                 INTEGER NOT NULL DEFAULT 0,
+      revision                   INTEGER NOT NULL DEFAULT 1,
+      active_revision            INTEGER NOT NULL DEFAULT 1,
+      created_at                 INTEGER NOT NULL,
+      updated_at                 INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_install_profiles_single_default
+      ON install_profiles(is_default) WHERE is_default = 1;
+
+    CREATE TABLE IF NOT EXISTS install_profile_revisions (
+      profile_id TEXT NOT NULL,
+      revision   INTEGER NOT NULL,
+      snapshot   TEXT NOT NULL,
+      note       TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY(profile_id, revision),
+      FOREIGN KEY(profile_id) REFERENCES install_profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_install_profile_revisions_profile
+      ON install_profile_revisions(profile_id, revision DESC);
   `)
   // 旧库补列：CREATE TABLE IF NOT EXISTS 不会为已存在的表添加新字段
   ensureColumn("clients", "os_name", "TEXT NOT NULL DEFAULT ''")
+  ensureColumn("health_findings", "package_id", "TEXT")
+  ensureColumn("log_packages", "client_id", "TEXT")
+  ensureColumn("log_packages", "command_id", "TEXT")
+  ensureColumn("log_packages", "storage_name", "TEXT")
+  ensureColumn("log_packages", "size_bytes", "INTEGER NOT NULL DEFAULT 0")
+  ensureColumn("log_packages", "sha256", "TEXT")
+  ensureColumn("log_packages", "sources", "TEXT NOT NULL DEFAULT '[]'")
+  ensureColumn("log_packages", "entry_count", "INTEGER NOT NULL DEFAULT 0")
+  ensureColumn("log_packages", "truncated", "INTEGER NOT NULL DEFAULT 0")
+  ensureColumn("log_packages", "error", "TEXT")
+  ensureColumn("log_packages", "analyzed_at", "INTEGER")
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_log_packages_command
+      ON log_packages(command_id) WHERE command_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_health_findings_package ON health_findings(package_id);
+  `)
+  if (ensureColumn("install_profiles", "active_revision", "INTEGER NOT NULL DEFAULT 1")) {
+    db.exec("UPDATE install_profiles SET active_revision = revision")
+  }
   logger.info("数据库结构已初始化：", config.databasePath)
 }
 
 /** 幂等地为已存在的表补充列 */
-function ensureColumn(table: string, column: string, definition: string) {
+function ensureColumn(table: string, column: string, definition: string): boolean {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]
-  if (cols.some((c) => c.name === column)) return
+  if (cols.some((c) => c.name === column)) return false
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
   logger.info(`数据库已补充字段：${table}.${column}`)
+  return true
 }

@@ -185,6 +185,17 @@ public sealed class WindowsProcessTerminatorTests
     }
 
     [Fact]
+    public async Task Rejects_a_start_time_that_differs_from_the_inventory_snapshot()
+    {
+        var controller = FakeController.ForPath(AllowedPath);
+        var result = await Create([AllowedPath], controller).ExecuteAsync(
+            Payload(123, AllowedPath, expectedStartedAtUtc: Started.AddSeconds(1)), CancellationToken.None);
+        Assert.Equal("failed", result.Status);
+        Assert.Contains("inventory snapshot", result.Result);
+        Assert.False(controller.Handle.KillCalled);
+    }
+
+    [Fact]
     public async Task Marks_a_stalled_termination_as_timed_out()
     {
         var controller = FakeController.ForPath(AllowedPath);
@@ -241,11 +252,12 @@ public sealed class WindowsProcessTerminatorTests
     private static WindowsProcessTerminator Create(string[] allowed, IWindowsProcessController controller) =>
         new(Options.Create(new AgentOptions { ServerUrl = "http://127.0.0.1", AllowedProcessPaths = allowed }), controller);
 
-    private static JsonElement Payload(int processId, string expectedPath, int? timeoutSeconds = null, bool? killProcessTree = null)
+    private static JsonElement Payload(int processId, string expectedPath, int? timeoutSeconds = null, bool? killProcessTree = null, DateTime? expectedStartedAtUtc = null)
     {
         var values = new Dictionary<string, object?> { ["processId"] = processId, ["expectedPath"] = expectedPath };
         if (timeoutSeconds.HasValue) values["timeoutSeconds"] = timeoutSeconds.Value;
         if (killProcessTree.HasValue) values["killProcessTree"] = killProcessTree.Value;
+        if (expectedStartedAtUtc.HasValue) values["expectedStartedAtUtc"] = expectedStartedAtUtc.Value.ToUniversalTime();
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(values));
         return document.RootElement.Clone();
     }

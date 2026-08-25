@@ -144,9 +144,15 @@ sudo PURGE=1 ./deploy/uninstall.sh   # 卸载并删除数据与用户
 | POST | `/tasks/:id/dispatch` | **把任务下发到目标客户端**（核心链路） |
 | GET/DELETE | `/logs`，`/logs/sources` | 日志查询与清空 |
 | GET/POST/PATCH/DELETE | `/plugins[/:id]` | 插件管理，`/:id/status` 改状态 |
-| GET | `/health/findings`、`/health/packages`、`/health/stats` | 健康监控 |
+| GET | `/health/findings`、`/health/packages`、`/health/stats` | 健康发现项、采集包和统计 |
 | POST | `/health/findings/:id/read`、`/health/findings/read-all` | 标记已读 |
+| POST | `/health/collections` | 向在线 Windows Agent 批量下发日志采集并创建关联日志包 |
+| GET | `/health/packages/:id/download` | 校验 SHA-256 后下载原始 JSON 快照 |
+| POST | `/health/packages/:id/reanalyze` | 对已归档快照重新运行内置高信号分析 |
+| POST | `/health/packages/:id/recollect` | 对失败日志包的原客户端重新采集 |
 | GET/PUT | `/settings` | 系统设置读写 |
+| GET/POST/PUT/DELETE | `/install-profiles[/:id]` | 安装档案、默认档案与乐观锁更新 |
+| GET/POST | `/install-profiles/:id/revisions[...]` | 安装档案历史与恢复 |
 
 ### 客户端 API（`/agent`）
 
@@ -159,11 +165,15 @@ sudo PURGE=1 ./deploy/uninstall.sh   # 卸载并删除数据与用户
 | POST | `/findings` | 令牌 | 上报健康发现 |
 | WS | `/agent/ws?token=<token>` | 令牌 | 长连接，实时接收下发指令 |
 
+健康中心复用 `collect-logs` 的 512 KiB 结构化结果上限。服务端把结果原子归档为 JSON，保存字节数和 SHA-256，
+然后分析电源、磁盘、应用崩溃、服务、网络和 Agent 自身错误；相同事件按指纹合并，每个日志包最多生成 100 项发现。
+`HEALTH_ARTIFACTS_PATH` 可单独指定快照目录；未指定时优先使用 `ARTIFACTS_PATH/health`，两项均未指定则落在数据库目录旁。
+
 Windows Agent 安装与制品接口：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/install.ps1` | 按当前服务端地址动态生成 Windows 安装脚本 |
+| GET | `/install.ps1[?profile=PROFILE_ID]` | 按默认或指定安装档案动态生成 Windows 安装脚本 |
 | GET | `/uninstall.ps1` | Windows 卸载脚本 |
 | GET | `/agent/downloads/windows/latest.json` | 当前 Windows Agent 版本与 SHA-256 清单 |
 | GET | `/agent/downloads/windows/:file` | Windows Agent 单文件制品 |
@@ -200,6 +210,26 @@ curl -s -X POST $BASE/api/panel/commands/batch \
 curl -s -X POST $BASE/api/panel/clients/<clientId>/commands \
   -H "authorization: Bearer $PANEL_KEY" -H 'content-type: application/json' \
   -d '{"type":"manage-service","payload":{"serviceName":"ExampleService","action":"query","timeoutSeconds":30}}'
+
+# Agent 1.1.18+ 手动获取 Windows 服务、PID、CPU 与内存快照；该只读动作不受 allowedServices 限制
+curl -H "Authorization: Bearer $PANEL_API_KEY" -H "Content-Type: application/json" \
+  -d '{"type":"manage-service","payload":{"action":"list"}}' \
+  http://localhost:8443/api/panel/clients/CLIENT_ID/commands
+
+# Agent 1.1.19+ 手动获取全部可见 Windows 进程快照；该命令仅支持单个 Windows 客户端
+curl -H "Authorization: Bearer $PANEL_API_KEY" -H "Content-Type: application/json" \
+  -d '{"type":"list-processes","payload":{}}' \
+  http://localhost:8443/api/panel/clients/CLIENT_ID/commands
+
+# Agent 1.1.20+ 重启活动用户会话中的普通进程；参数、会话与重启 intent 仅由 Agent 本机处理
+curl -H "Authorization: Bearer $PANEL_API_KEY" -H "Content-Type: application/json" \
+  -d '{"type":"restart-process","payload":{"processId":1234,"expectedPath":"C:\\Example\\worker.exe","expectedStartedAtUtc":"2026-08-25T08:00:00Z","timeoutSeconds":30}}' \
+  http://localhost:8443/api/panel/clients/CLIENT_ID/commands
+
+# Agent 1.1.20+ 切换 Windows 任务管理器式效能模式
+curl -H "Authorization: Bearer $PANEL_API_KEY" -H "Content-Type: application/json" \
+  -d '{"type":"set-process-efficiency","payload":{"processId":1234,"expectedPath":"C:\\Example\\worker.exe","expectedStartedAtUtc":"2026-08-25T08:00:00Z","enabled":true}}' \
+  http://localhost:8443/api/panel/clients/CLIENT_ID/commands
 
 # Windows 进程终止同样复用通用接口，并由目标 Agent 的 allowedProcessPaths 约束
 curl -s -X POST $BASE/api/panel/clients/<clientId>/commands \

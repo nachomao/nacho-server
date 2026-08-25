@@ -51,6 +51,34 @@ public sealed class WindowsProcessIntegrationTests
         }
     }
 
+    [Fact]
+    public void Captures_command_line_and_round_trips_windows_efficiency_mode_on_a_fixture()
+    {
+        using var target = StartHelper("--idle process-action-token");
+        try
+        {
+            var platform = new WindowsProcessActionPlatform();
+            var snapshot = platform.Capture(target.Id);
+            Assert.Contains("process-action-token", snapshot.CommandLine);
+            Assert.NotNull(snapshot.StartedAtUtc);
+            Assert.True(snapshot.SessionId > 0);
+            Assert.True(snapshot.CanSetEfficiency);
+            Assert.False(snapshot.EfficiencyMode);
+
+            var enabled = platform.SetEfficiency(target.Id, true, null);
+            Assert.Equal(0, enabled.ErrorCode);
+            Assert.True(enabled.FinalEnabled);
+            Assert.Equal("idle", enabled.FinalPriority);
+
+            var disabled = platform.SetEfficiency(target.Id, false, snapshot.Priority);
+            Assert.Equal(0, disabled.ErrorCode);
+            Assert.False(disabled.FinalEnabled);
+            Assert.True(disabled.PriorityRestored);
+            Assert.Equal(snapshot.Priority, disabled.FinalPriority);
+        }
+        finally { Stop(target); }
+    }
+
     private static Process StartHelper(string argument, bool redirectOutput = false)
     {
         var configuration = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar)).Parent!.Name;

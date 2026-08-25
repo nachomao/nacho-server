@@ -13,6 +13,8 @@ import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
 import * as managedArtifacts from "../services/managed-artifacts"
+import * as installProfiles from "../services/install-profiles"
+import { healthCollectionSchema } from "../schemas/health"
 
 export const panelRouter = Router()
 
@@ -502,7 +504,7 @@ panelRouter.get(
 panelRouter.post(
   "/health/findings/:id/read",
   asyncHandler((req, res) => {
-    health.markRead(req.params.id)
+    if (!health.markRead(req.params.id)) return fail(res, "健康发现项不存在", 404)
     return ok(res, { id: req.params.id })
   }),
 )
@@ -518,6 +520,39 @@ panelRouter.post(
 panelRouter.get(
   "/health/packages",
   asyncHandler((_req, res) => ok(res, health.listPackages())),
+)
+
+panelRouter.post(
+  "/health/collections",
+  asyncHandler((req, res) => ok(res, health.createCollections(parseBody(healthCollectionSchema, req.body)), 201)),
+)
+
+panelRouter.get(
+  "/health/packages/:id/download",
+  asyncHandler((req, res) => {
+    const download = health.getPackageDownload(req.params.id)
+    res.setHeader("Content-Type", "application/json; charset=utf-8")
+    res.setHeader("Content-Length", String(download.sizeBytes))
+    res.setHeader("Cache-Control", "no-store")
+    res.setHeader("X-Content-SHA256", download.sha256)
+    return res.download(download.filePath, download.fileName)
+  }),
+)
+
+panelRouter.post(
+  "/health/packages/:id/reanalyze",
+  asyncHandler((req, res) => {
+    parseBody(z.object({}).strict(), req.body)
+    return ok(res, health.reanalyzePackage(req.params.id))
+  }),
+)
+
+panelRouter.post(
+  "/health/packages/:id/recollect",
+  asyncHandler((req, res) => {
+    parseBody(z.object({}).strict(), req.body)
+    return ok(res, health.recollectPackage(req.params.id), 201)
+  }),
 )
 
 panelRouter.get(
@@ -536,5 +571,106 @@ panelRouter.put(
   asyncHandler((req, res) => {
     const body = parseBody(z.record(z.unknown()), req.body)
     return ok(res, settings.saveSettings(body))
+  }),
+)
+
+/* ==================== 安装档案 ==================== */
+const printableText = (maximum: number) => z.string().trim().min(1).max(maximum)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "不得包含控制字符")
+
+const nullableTrimmed = (maximum: number) => z.string().trim().max(maximum)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), "不得包含控制字符")
+  .transform((value) => value || null).nullable()
+
+const agentServerUrlSchema = z.string().trim().max(2048)
+  .transform((value) => value || null).nullable().refine((value) => {
+    if (value === null) return true
+    try {
+      const parsed = new URL(value)
+      return ["http:", "https:"].includes(parsed.protocol) &&
+        !parsed.username && !parsed.password && !parsed.search && !parsed.hash &&
+        (parsed.pathname === "/" || parsed.pathname === "")
+    } catch { return false }
+  }, "必须是根路径上的绝对 HTTP/HTTPS 地址，且不得包含凭据、查询或片段")
+
+const installProfileValuesSchema = z.object({
+  name: printableText(80),
+  runMode: z.enum(["menu", "silent"]),
+  agentServerUrl: agentServerUrlSchema,
+  heartbeatSeconds: z.number().int().min(5).max(3600),
+  pollSeconds: z.number().int().min(5).max(3600),
+  clientName: nullableTrimmed(100),
+  group: printableText(80),
+  tags: z.array(printableText(40)).max(20)
+    .refine((items) => new Set(items.map((item) => item.toLocaleLowerCase())).size === items.length, "标签不得重复"),
+  overwriteExisting: z.boolean(),
+  reEnrollOnServerChange: z.boolean(),
+}).strict()
+
+const installProfileCreateSchema = installProfileValuesSchema.extend({
+  note: z.string().trim().max(500).optional(),
+}).strict()
+
+const installProfileUpdateSchema = installProfileValuesSchema.extend({
+  expectedRevision: z.number().int().positive(),
+  expectedActiveRevision: z.number().int().positive(),
+  note: z.string().trim().max(500).optional(),
+}).strict()
+
+panelRouter.get(
+  "/install-profiles",
+  asyncHandler((_req, res) => ok(res, installProfiles.listProfiles())),
+)
+
+panelRouter.post(
+  "/install-profiles",
+  asyncHandler((req, res) => {
+    const { note, ...input } = parseBody(installProfileCreateSchema, req.body)
+    return ok(res, installProfiles.createProfile(input, note), 201)
+  }),
+)
+
+panelRouter.put(
+  "/install-profiles/:id",
+  asyncHandler((req, res) => {
+    const { expectedRevision, expectedActiveRevision, note, ...input } = parseBody(installProfileUpdateSchema, req.body)
+    return ok(res, installProfiles.updateProfile(req.params.id, input, expectedRevision, expectedActiveRevision, note))
+  }),
+)
+
+panelRouter.delete(
+  "/install-profiles/:id",
+  asyncHandler((req, res) => ok(res, installProfiles.deleteProfile(req.params.id))),
+)
+
+panelRouter.post(
+  "/install-profiles/:id/default",
+  asyncHandler((req, res) => {
+    parseBody(z.object({}).strict(), req.body)
+    return ok(res, installProfiles.setDefaultProfile(req.params.id))
+  }),
+)
+
+panelRouter.get(
+  "/install-profiles/:id/revisions",
+  asyncHandler((req, res) => ok(res, installProfiles.listRevisions(req.params.id))),
+)
+
+panelRouter.post(
+  "/install-profiles/:id/revisions/:revision/restore",
+  asyncHandler((req, res) => {
+    const revision = z.coerce.number().int().positive().parse(req.params.revision)
+    const body = parseBody(z.object({
+      expectedRevision: z.number().int().positive(),
+      expectedActiveRevision: z.number().int().positive(),
+      note: z.string().trim().max(500).optional(),
+    }).strict(), req.body)
+    return ok(res, installProfiles.restoreRevision(
+      req.params.id,
+      revision,
+      body.expectedRevision,
+      body.expectedActiveRevision,
+      body.note,
+    ))
   }),
 )

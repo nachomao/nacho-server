@@ -1,6 +1,6 @@
 # Nacho Windows Agent
 
-Windows 客户端负责设备注册、DPAPI 设备令牌持久化、心跳与指标、WebSocket 实时接收、HTTP 轮询回退、可靠指令确认，以及受本机策略约束的程序执行、Windows 服务控制、本机进程终止与系统重启。
+Windows 客户端负责设备注册、DPAPI 设备令牌持久化、心跳与指标、WebSocket 实时接收、HTTP 轮询回退、可靠指令确认，以及受本机策略约束的程序执行、Windows 服务控制、本机进程清单、进程终止与系统重启。
 
 ## 运行结构
 
@@ -44,9 +44,24 @@ TRUST_PROXY=false
 irm http://SERVER:PORT/install.ps1 | iex
 ```
 
+服务端可维护多个安装档案。裸 `/install.ps1` 使用默认档案；指定档案使用：
+
+```powershell
+irm "http://SERVER:PORT/install.ps1?profile=PROFILE_ID" | iex
+```
+
+档案保存 `menu` 或 `silent` 默认模式，以及 Agent 连接地址、心跳、HTTP 回退轮询、名称、分组和标签。一次性覆盖模式可使用：
+
+```powershell
+& { $env:NACHO_INSTALL_MODE='menu'; irm "http://SERVER:PORT/install.ps1?profile=PROFILE_ID" | iex }
+& { $env:NACHO_INSTALL_MODE='silent'; irm "http://SERVER:PORT/install.ps1?profile=PROFILE_ID" | iex }
+```
+
+`silent` 自动选择安装、跳过菜单和失败暂停，仅保留最终结果与 `install.log`；普通用户启动时仍会显示 Windows UAC。关闭开放入网时，静默部署继续通过当前进程的 `NACHO_ENROLLMENT_KEY` 提供密钥，档案和 URL 均不保存该凭据。
+
 Windows PowerShell 5.1 请使用上面的 `irm` 命令；裸用 `iwr URL | iex` 可能触发旧 Internet Explorer 解析器的 `NullReferenceException`。确需使用 `iwr` 时应写成 `iwr URL -UseBasicParsing | Select-Object -ExpandProperty Content | iex`。
 
-重复运行会停止并升级现有服务、等待旧服务进程完全退出、重试替换被短暂占用的可执行文件、更新服务器地址，并保留设备身份和管理员维护的允许列表。升级中途失败时会尝试恢复原有运行中服务。
+重复运行会停止并升级现有服务、等待旧服务进程完全退出、重试替换被短暂占用的可执行文件、更新服务器地址，并保留设备身份和管理员维护的允许列表。档案可显式覆盖已有基础配置；切换到独立服务端时可显式备份并重建设备身份。升级中途失败时会恢复旧可执行文件、配置、设备状态和原服务运行状态。
 
 安装器会把完整过程追加到 `%ProgramData%\Nacho\install.log`，启动服务后最多等待 45 秒确认 `state.dat` 已生成，只有设备真实注册完成才报告成功。提权子进程失败时，原 PowerShell 窗口会保留错误信息，交互运行的提权窗口也会等待确认后再关闭。
 
@@ -86,6 +101,12 @@ irm http://SERVER:PORT/uninstall.ps1 | iex
     "timeoutSeconds": 30
   }
 }
+```
+
+Agent 1.1.18 起支持手动获取服务与宿主进程资源快照：
+
+```json
+{ "type": "manage-service", "payload": { "action": "list" } }
 ```
 
 - `shell` 只接受 `cmd` 或 `powershell`；脚本必须含非空白内容，长度为 1 至 32,768 个 Unicode 标量，且不得包含 NUL 或换行、制表符以外的控制字符。
@@ -130,17 +151,45 @@ irm http://SERVER:PORT/uninstall.ps1 | iex
 }
 ```
 
-- `allowedServices` 默认为空数组，只接受真实服务名称并按 Windows 规则进行不区分大小写的精确匹配，不支持通配符。
-- `NachoAgent` 始终禁止控制自身，即使它被误加进允许列表。
-- `action` 仅接受 `query`、`start`、`stop`、`restart`；超时默认 30 秒，范围为 1 至 120 秒。
+- `list` 返回全部 Windows 服务；`query` 可只读查询任意真实服务。`allowedServices` 默认为空数组，只约束 `start`、`stop`、`restart`，并按 Windows 规则进行不区分大小写的精确匹配，不支持通配符；该独立允许列表不受全局 `disableAllPolicies` 开关影响。
+- `NachoAgent` 可只读查看，始终禁止启动、停止或重启自身，即使它被误加进允许列表。
+- `action` 接受 `list`、`query`、`start`、`stop`、`restart`；控制超时默认 30 秒，范围为 1 至 120 秒。
 - Agent 仅使用本机 `System.ServiceProcess.ServiceController` API，不执行 shell、PowerShell 或 `sc.exe`，也不接受远程机器名。
 - `start` 与 `stop` 对已处于目标状态的服务幂等成功；`restart` 在停止成功后再启动。
-- `result` 是 JSON 字符串，包含 `serviceName`、`action`、`initialStatus`、`finalStatus`、`durationMs`、`timedOut` 与 `error`；该命令没有伪造退出码。
+- 单项 `result` 是 JSON 字符串，包含 `serviceName`、`action`、`initialStatus`、`finalStatus`、`durationMs`、`timedOut` 与 `error`；该命令没有伪造退出码。
+- 清单 `result` 包含采集时间、采样耗时、总数、返回数、截断标记和服务数组；每项包含服务名、显示名称、状态、PID、控制策略、共享宿主标记以及 CPU、工作集、专用内存。CPU 采样约 750 ms，共享 PID 的资源值代表整个宿主进程，不是单项服务的独占值。
+- 清单按服务名稳定排序，结果接近 480 KiB 时整行截断，并始终低于服务端 512 KiB 上限。
 - 面板入口位于“客户端管理 -> 批量操作 -> Windows -> 服务控制”，下发前会确认目标、服务名、动作和超时，并持续读取真实命令状态与结构化结果。
 
 新安装生成的 `%ProgramData%\Nacho\agent.json` 包含 `"allowedServices": []`。管理员应在目标机器上把允许控制的真实服务名称写入该数组并重启 `NachoAgent`；覆盖升级只更新 `serverUrl`，保留现有允许列表与其他管理员配置。
 
 真实集成验收必须使用专门创建或明确选定的非关键测试服务：记录原状态，依次验证 `query/start/stop/restart`，最后恢复原状态。不得使用关键系统服务或 `NachoAgent`。执行验收的终端需要管理员令牌；普通终端只能运行替身状态机单元测试。
+
+## `list-processes` 契约
+
+Agent 1.1.19 起支持手动获取全部可见 Windows 进程：
+
+```json
+{
+  "type": "list-processes",
+  "payload": {}
+}
+```
+
+- 该命令只接受严格空对象并仅支持单个 Windows 客户端；它复用通用命令、journal、ACK、WebSocket/HTTP 回退和结果重试链路。
+- Agent 使用 `System.Diagnostics.Process` 枚举进程并进行约 750 ms 的 CPU 双点采样，不执行 shell、PowerShell、WMI 或外部命令。
+- 每项包含 PID、进程名、可读取时的绝对映像路径、启动时间、会话、CPU、工作集、专用内存、效能模式，以及根据 PID 4、Agent 自身、路径可读性和 `allowedProcessPaths` 计算的终止、重启与效能模式能力。
+- 访问受限的行仍保留基础信息；面板允许选择任何返回行，最终终止仍由 `terminate-process` 重新校验 PID、路径、启动时间和本机策略。
+- 清单按进程名和 PID 稳定排序，接近 480 KiB 时按完整行截断，始终低于服务端 512 KiB 上限；服务日志只记录数量、截断标志和结果字节数。
+- 面板入口位于“客户端管理 -> 进程终止”；用户手动点击“获取进程/刷新进程”，搜索或排序后点选一行回填 PID 与映像路径，不自动刷新。
+
+Agent 1.1.20 起，桌面进程行右键菜单和移动端 `…` 菜单提供：
+
+- **终止进程**：复用 `terminate-process`，固定只终止当前 PID，并带上清单的 `expectedStartedAtUtc` 防止 PID 复用；完整进程树终止仍使用原页面表单。
+- **重启进程**：仅支持当前活动交互用户会话中的普通进程。Agent 读取原命令行、保留参数，通过 `CreateProcessAsUser` 在原会话启动；会话 0、系统进程、Agent 自身或上下文不可读时禁用。
+- **效能模式**：通过 `GetProcessInformation` / `SetProcessInformation(ProcessPowerThrottling)` 切换 EcoQoS，并在启用时使用低优先级。Agent 保存原优先级，关闭时恢复；外部开启且没有原记录时仅清除 EcoQoS。
+- `restart-process` 使用 DPAPI `LocalMachine` 保护 `%ProgramData%\Nacho\process-restarts\<commandId>.dat` 中的启动上下文，按阶段恢复且不会在未知启动状态下重复拉起进程。
+- 新动作只支持单个 Windows 客户端，不加入批量命令；服务端日志只记录动作、路径哈希和结果大小，不记录命令行、用户名或完整路径。
 
 ## `terminate-process` 契约
 
@@ -159,6 +208,7 @@ irm http://SERVER:PORT/uninstall.ps1 | iex
 - `allowedProcessPaths` 默认为空数组，每一项必须是规范化绝对可执行文件路径，并按 Windows 规则进行不区分大小写的精确匹配；目录、文件名和通配符不产生匹配。
 - `processId` 必须是正整数；PID 0、PID 4 与当前 `NachoAgent` 进程始终被拒绝。
 - `expectedPath` 与从目标进程读取的真实映像路径必须同时命中同一允许项，且终止前会再次比较 PID、启动时间和映像路径以检测 PID 复用。
+- `expectedStartedAtUtc` 为可选快照身份字段；右键菜单始终提供该字段，手工表单保持向后兼容。
 - `timeoutSeconds` 默认 30 秒，范围为 1 至 120 秒；`killProcessTree` 默认 `true` 且只接受布尔值。
 - Agent 仅使用本机 `System.Diagnostics.Process` API，不执行 shell、PowerShell、`taskkill.exe` 或 WMI，也不接受远程机器名。
 - 目标身份确认前消失会失败；身份确认后自然退出按幂等成功处理；访问拒绝、身份变化、API 异常与超时均报告 `failed`。

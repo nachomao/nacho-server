@@ -37,8 +37,14 @@ builder.Services.AddSingleton<IPackageInstallerRunner, PackageInstallerRunner>()
     builder.Services.AddSingleton<PackageInstallManager>();
     builder.Services.AddSingleton<FileDeploymentManager>();
 builder.Services.AddSingleton<IWindowsServiceController, WindowsServiceController>();
+builder.Services.AddSingleton<IWindowsServiceInventory, WindowsServiceInventory>();
+builder.Services.AddSingleton<IProcessResourceReader, WindowsProcessResourceReader>();
 builder.Services.AddSingleton<WindowsServiceManager>();
 builder.Services.AddSingleton<IWindowsProcessController, WindowsProcessController>();
+builder.Services.AddSingleton<IWindowsProcessActionPlatform, WindowsProcessActionPlatform>();
+builder.Services.AddSingleton<IWindowsProcessInventory, WindowsProcessInventory>();
+builder.Services.AddSingleton<WindowsProcessInventoryManager>();
+builder.Services.AddSingleton<WindowsProcessActionManager>();
 builder.Services.AddSingleton<WindowsProcessTerminator>();
 builder.Services.AddSingleton<IBootIdentityProvider, WindowsBootIdentityProvider>();
 builder.Services.AddSingleton<IWindowsRestartController, WindowsRestartController>();

@@ -1,4 +1,5 @@
 using System.ServiceProcess;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
@@ -42,13 +43,13 @@ public sealed class WindowsServiceManagerTests
     }
 
     [Fact]
-    public async Task Rejects_missing_service_name_and_non_allowlisted_service()
+    public async Task Rejects_missing_service_name_and_non_allowlisted_mutation()
     {
         using var emptyPayload = JsonDocument.Parse("{}");
         var manager = Create(["ExampleService"], new FakeServiceController(ServiceControllerStatus.Running));
 
         var missing = await manager.ExecuteAsync(emptyPayload.RootElement, CancellationToken.None);
-        var blocked = await manager.ExecuteAsync(Payload("OtherService", "query"), CancellationToken.None);
+        var blocked = await manager.ExecuteAsync(Payload("OtherService", "stop"), CancellationToken.None);
 
         Assert.Equal("failed", missing.Status);
         Assert.Contains("serviceName", missing.Result);
@@ -64,6 +65,97 @@ public sealed class WindowsServiceManagerTests
 
         Assert.Equal("failed", result.Status);
         Assert.Contains("cannot control itself", Result(result).GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Query_is_read_only_for_non_allowlisted_services_and_agent_self()
+    {
+        var controller = new FakeServiceController(ServiceControllerStatus.Running);
+        var manager = Create([], controller);
+
+        var ordinary = await manager.ExecuteAsync(Payload("OtherService", "query"), CancellationToken.None);
+        var agent = await manager.ExecuteAsync(Payload("NachoAgent", "query"), CancellationToken.None);
+
+        Assert.Equal("success", ordinary.Status);
+        Assert.Equal("success", agent.Status);
+        Assert.Equal(0, controller.StartCalls + controller.StopCalls);
+    }
+
+    [Fact]
+    public async Task Global_policy_bypass_does_not_bypass_the_service_allowlist()
+    {
+        var controller = new FakeServiceController(ServiceControllerStatus.Running);
+        var manager = Create([], controller, disableAllPolicies: true);
+        var result = await manager.ExecuteAsync(Payload("OtherService", "stop"), CancellationToken.None);
+        Assert.Equal("failed", result.Status);
+        Assert.Contains("allowlist", result.Result);
+        Assert.Equal(0, controller.StopCalls);
+    }
+
+    [Fact]
+    public async Task Lists_services_with_policy_shared_process_and_resource_snapshot()
+    {
+        var inventory = new FakeServiceInventory([
+            new("AllowedService", "Allowed service", ServiceControllerStatus.Running, 42),
+            new("ReadOnlyService", "Read only service", ServiceControllerStatus.Running, 42),
+            new("NachoAgent", "Nacho Agent", ServiceControllerStatus.Running, 43),
+            new("StoppedService", "Stopped service", ServiceControllerStatus.Stopped, null),
+        ]);
+        var resources = new FakeProcessResourceReader(new Dictionary<int, Queue<ProcessResourcePoint?>>
+        {
+            [42] = new([
+                new ProcessResourcePoint(TimeSpan.FromMilliseconds(100), 1000, 800),
+                new ProcessResourcePoint(TimeSpan.FromMilliseconds(200), 1200, 900),
+            ]),
+            [43] = new([
+                new ProcessResourcePoint(TimeSpan.FromMilliseconds(50), 2000, 1500),
+                new ProcessResourcePoint(TimeSpan.FromMilliseconds(50), 2100, 1600),
+            ]),
+        });
+        var manager = Create(["AllowedService"], new FakeServiceController(ServiceControllerStatus.Running), inventory, resources);
+
+        var result = await manager.ExecuteAsync(Payload("list"), CancellationToken.None);
+        var json = Result(result);
+        var rows = json.GetProperty("services").EnumerateArray().ToDictionary(row => row.GetProperty("serviceName").GetString()!);
+
+        Assert.Equal("success", result.Status);
+        Assert.Equal(4, json.GetProperty("total").GetInt32());
+        Assert.False(json.GetProperty("truncated").GetBoolean());
+        Assert.True(rows["AllowedService"].GetProperty("canControl").GetBoolean());
+        Assert.True(rows["AllowedService"].GetProperty("sharedProcess").GetBoolean());
+        Assert.Equal(2, rows["AllowedService"].GetProperty("sharedServiceCount").GetInt32());
+        Assert.Equal(1200, rows["AllowedService"].GetProperty("resources").GetProperty("workingSetBytes").GetInt64());
+        Assert.False(rows["ReadOnlyService"].GetProperty("canControl").GetBoolean());
+        Assert.Equal("not-allowlisted", rows["ReadOnlyService"].GetProperty("controlRestriction").GetString());
+        Assert.Equal("agent-self", rows["NachoAgent"].GetProperty("controlRestriction").GetString());
+        Assert.Equal(JsonValueKind.Null, rows["StoppedService"].GetProperty("resources").ValueKind);
+    }
+
+    [Fact]
+    public async Task List_result_is_utf8_bounded_and_reports_truncation()
+    {
+        var services = Enumerable.Range(0, 5000)
+            .Select(index => new WindowsServiceSnapshot($"Service{index:D5}", new string('服', 240), ServiceControllerStatus.Stopped, null))
+            .ToArray();
+        var manager = Create([], new FakeServiceController(ServiceControllerStatus.Stopped), new FakeServiceInventory(services));
+
+        var result = await manager.ExecuteAsync(Payload("list"), CancellationToken.None);
+        var json = Result(result);
+
+        Assert.Equal("success", result.Status);
+        Assert.True(json.GetProperty("truncated").GetBoolean());
+        Assert.Equal(5000, json.GetProperty("total").GetInt32());
+        Assert.True(json.GetProperty("returned").GetInt32() < 5000);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Result) <= 480 * 1024);
+    }
+
+    [Fact]
+    public void Restart_recovery_returns_list_shaped_failure()
+    {
+        var result = Result(new ExecutionResult("failed", WindowsServiceManager.ErrorJson(Payload("list"), "restarted"), null));
+        Assert.Equal("list", result.GetProperty("action").GetString());
+        Assert.Empty(result.GetProperty("services").EnumerateArray());
+        Assert.Equal("restarted", result.GetProperty("error").GetString());
     }
 
     [Theory]
@@ -181,8 +273,23 @@ public sealed class WindowsServiceManagerTests
         Assert.Equal(expected, WindowsServiceManager.StatusName(status));
     }
 
-    private static WindowsServiceManager Create(string[] allowed, IWindowsServiceController controller) =>
-        new(Options.Create(new AgentOptions { ServerUrl = "http://127.0.0.1", AllowedServices = allowed }), controller);
+    private static WindowsServiceManager Create(
+        string[] allowed,
+        IWindowsServiceController controller,
+        IWindowsServiceInventory? inventory = null,
+        IProcessResourceReader? resources = null,
+        bool disableAllPolicies = false) =>
+        new(
+            Options.Create(new AgentOptions { ServerUrl = "http://127.0.0.1", AllowedServices = allowed, DisableAllPolicies = disableAllPolicies }),
+            controller,
+            inventory ?? new FakeServiceInventory([]),
+            resources ?? new FakeProcessResourceReader());
+
+    private static JsonElement Payload(string action)
+    {
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { action }));
+        return document.RootElement.Clone();
+    }
 
     private static JsonElement Payload(string serviceName, string action, int? timeoutSeconds = null)
     {
@@ -224,5 +331,17 @@ public sealed class WindowsServiceManagerTests
             StopCalls++;
             _status = CompleteTransitions ? ServiceControllerStatus.Stopped : ServiceControllerStatus.StopPending;
         }
+    }
+
+    private sealed class FakeServiceInventory(IReadOnlyList<WindowsServiceSnapshot> services) : IWindowsServiceInventory
+    {
+        public IReadOnlyList<WindowsServiceSnapshot> List() => services;
+    }
+
+    private sealed class FakeProcessResourceReader(Dictionary<int, Queue<ProcessResourcePoint?>>? values = null) : IProcessResourceReader
+    {
+        private readonly Dictionary<int, Queue<ProcessResourcePoint?>> _values = values ?? [];
+        public ProcessResourcePoint? Read(int processId) =>
+            _values.TryGetValue(processId, out var queue) && queue.Count > 0 ? queue.Dequeue() : null;
     }
 }

@@ -386,7 +386,7 @@ test("run-shell payload and result survive lifecycle without copying output into
   })
   assert.equal(commands.reportResult(command.id, client.id, "success", result, 0), true)
   assert.equal(commands.getCommand(command.id)?.status, "success")
-  const log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' ORDER BY ts DESC LIMIT 1").get() as { detail: string }
+  const log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' AND detail IS NOT NULL ORDER BY ts DESC LIMIT 1").get() as { detail: string }
   assert.equal(log.detail, `resultBytes=${Buffer.byteLength(result, "utf8")};exitCode=0`)
   assert.equal(log.detail.includes("sensitive-output"), false)
 })
@@ -412,6 +412,168 @@ test("manage-service payload and structured result survive the generic command l
   assert.equal(commands.reportResult(command.id, client.id, "success", result), true)
   assert.equal(commands.getCommand(command.id)?.status, "success")
   assert.deepEqual(JSON.parse(commands.getCommand(command.id)?.result ?? "{}"), JSON.parse(result))
+  const log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' AND detail IS NOT NULL ORDER BY ts DESC LIMIT 1").get() as { detail: string }
+  assert.match(log.detail, /^action=restart;serviceNameHash=[a-f0-9]{12};timedOut=false;resultBytes=\d+$/)
+  assert.equal(log.detail.includes("ExampleService"), false)
+})
+
+test("manage-service list is single-client only and validates inventory reports", () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients; DELETE FROM groups; DELETE FROM logs")
+  assert.equal(panelCommandSchema.safeParse({ type: "manage-service", payload: { action: "list" } }).success, true)
+  assert.equal(batchCommandSchema.safeParse({ clientIds: ["a"], type: "manage-service", payload: { action: "list" } }).success, false)
+  assert.equal(panelCommandSchema.safeParse({ type: "manage-service", payload: { action: "list", serviceName: "extra" } }).success, false)
+
+  const { client } = clients.registerClient({ name: "service-inventory-agent", os: "Windows" })
+  const command = commands.dispatchCommand({ clientId: client.id, type: "manage-service", payload: { action: "list" } })
+  assert.equal(commands.acknowledge(command.id, client.id), true)
+  assert.equal(commands.reportResult(command.id, client.id, "running"), true)
+  const result = JSON.stringify({
+    action: "list",
+    capturedAtUtc: "2026-08-25T01:02:03Z",
+    sampleDurationMs: 751,
+    total: 2,
+    returned: 2,
+    truncated: false,
+    services: [
+      {
+        serviceName: "AllowedService",
+        displayName: "Allowed service",
+        status: "running",
+        processId: 42,
+        canControl: true,
+        controlRestriction: null,
+        sharedProcess: false,
+        sharedServiceCount: 1,
+        resources: { cpuPercent: 1.25, workingSetBytes: 4096, privateMemoryBytes: 2048 },
+      },
+      {
+        serviceName: "StoppedService",
+        displayName: "Stopped service",
+        status: "stopped",
+        processId: null,
+        canControl: false,
+        controlRestriction: "not-allowlisted",
+        sharedProcess: false,
+        sharedServiceCount: 0,
+        resources: null,
+      },
+    ],
+    error: null,
+  })
+  assert.equal(commands.reportResult(command.id, client.id, "success", result), true)
+  const log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' AND detail IS NOT NULL ORDER BY ts DESC LIMIT 1").get() as { detail: string }
+  assert.match(log.detail, /^action=list;serviceCount=2;total=2;truncated=false;resultBytes=\d+$/)
+  assert.equal(log.detail.includes("AllowedService"), false)
+
+  const malformed = commands.dispatchCommand({ clientId: client.id, type: "manage-service", payload: { action: "list" } })
+  const inconsistent = JSON.stringify({ ...JSON.parse(result), returned: 1 })
+  assert.equal(commands.reportResult(malformed.id, client.id, "success", inconsistent), false)
+  assert.equal(commands.getCommand(malformed.id)?.status, "pending")
+})
+
+test("list-processes is strict, Windows-only, single-client, validated and redacted", () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients; DELETE FROM groups; DELETE FROM logs")
+  assert.equal(panelCommandSchema.safeParse({ type: "list-processes", payload: {} }).success, true)
+  assert.equal(panelCommandSchema.safeParse({ type: "list-processes", payload: { extra: true } }).success, false)
+  assert.equal(batchCommandSchema.safeParse({ clientIds: ["a"], type: "list-processes", payload: {} }).success, false)
+  assert.equal(commandSupportsClient("list-processes", "Windows"), true)
+  assert.equal(commandSupportsClient("list-processes", "Linux"), false)
+
+  const { client } = clients.registerClient({ name: "process-inventory-agent", os: "Windows" })
+  const command = commands.dispatchCommand({ clientId: client.id, type: "list-processes", payload: {} })
+  assert.equal(commands.acknowledge(command.id, client.id), true)
+  assert.equal(commands.reportResult(command.id, client.id, "running"), true)
+  const result = JSON.stringify({
+    capturedAtUtc: "2026-08-25T01:02:03Z",
+    sampleDurationMs: 751,
+    total: 2,
+    returned: 2,
+    truncated: false,
+    processes: [
+      {
+        processId: 42,
+        processName: "fixture-worker",
+        executablePath: "C:\\Fixtures\\fixture-worker.exe",
+        startedAtUtc: "2026-08-25T01:00:00Z",
+        sessionId: 1,
+        canTerminate: true,
+        terminationRestriction: null,
+        canRestart: true,
+        restartRestriction: null,
+        efficiencyMode: false,
+        canSetEfficiency: true,
+        efficiencyRestriction: null,
+        resources: { cpuPercent: 1.25, workingSetBytes: 4096, privateMemoryBytes: 2048 },
+      },
+      {
+        processId: 4,
+        processName: "System",
+        executablePath: null,
+        startedAtUtc: "2026-08-25T00:00:00Z",
+        sessionId: 0,
+        canTerminate: false,
+        terminationRestriction: "system",
+        canRestart: false,
+        restartRestriction: "system",
+        efficiencyMode: null,
+        canSetEfficiency: false,
+        efficiencyRestriction: "system",
+        resources: null,
+      },
+    ],
+    error: null,
+  })
+  assert.equal(commands.reportResult(command.id, client.id, "success", result), true)
+  assert.deepEqual(JSON.parse(commands.getCommand(command.id)?.result ?? "{}"), JSON.parse(result))
+  const log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' AND detail IS NOT NULL ORDER BY ts DESC LIMIT 1").get() as { detail: string }
+  assert.match(log.detail, /^processCount=2;total=2;truncated=false;resultBytes=\d+$/)
+  assert.equal(log.detail.includes("fixture-worker"), false)
+  assert.equal(log.detail.includes("Fixtures"), false)
+
+  const malformed = commands.dispatchCommand({ clientId: client.id, type: "list-processes", payload: {} })
+  assert.equal(commands.reportResult(malformed.id, client.id, "success", JSON.stringify({ ...JSON.parse(result), returned: 1 })), false)
+  assert.equal(commands.reportResult(malformed.id, client.id, "success", JSON.stringify({ ...JSON.parse(result), error: "failed" })), false)
+  assert.equal(commands.getCommand(malformed.id)?.status, "pending")
+})
+
+test("restart-process and set-process-efficiency are strict single-client Windows commands with redacted results", () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients; DELETE FROM groups; DELETE FROM logs")
+  const identity = { processId: 42, expectedPath: "C:\\Fixtures\\worker.exe", expectedStartedAtUtc: "2026-08-25T01:00:00Z" }
+  const restartPayload = { ...identity, timeoutSeconds: 30 }
+  const efficiencyPayload = { ...identity, enabled: true }
+  assert.equal(panelCommandSchema.safeParse({ type: "restart-process", payload: restartPayload }).success, true)
+  assert.equal(panelCommandSchema.safeParse({ type: "set-process-efficiency", payload: efficiencyPayload }).success, true)
+  assert.equal(panelCommandSchema.safeParse({ type: "restart-process", payload: { ...restartPayload, extra: true } }).success, false)
+  assert.equal(batchCommandSchema.safeParse({ clientIds: ["a"], type: "restart-process", payload: restartPayload }).success, false)
+  assert.equal(commandSupportsClient("restart-process", "Linux"), false)
+  assert.equal(commandSupportsClient("set-process-efficiency", "Windows"), true)
+
+  const { client } = clients.registerClient({ name: "process-action-agent", os: "Windows" })
+  const restart = commands.dispatchCommand({ clientId: client.id, type: "restart-process", payload: restartPayload })
+  assert.equal(commands.reportResult(restart.id, client.id, "running"), true)
+  const restartResult = JSON.stringify({
+    originalProcessId: 42, newProcessId: 84, expectedPath: identity.expectedPath,
+    expectedStartedAtUtc: identity.expectedStartedAtUtc, sessionId: 1, phase: "verified",
+    stopped: true, started: true, durationMs: 123, error: null,
+  })
+  assert.equal(commands.reportResult(restart.id, client.id, "success", restartResult), true)
+  let log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' AND detail IS NOT NULL ORDER BY rowid DESC LIMIT 1").get() as { detail: string }
+  assert.match(log.detail, /^action=restart;pathHash=[a-f0-9]{12};stopped=true;started=true;resultBytes=\d+$/)
+  assert.equal(log.detail.includes("Fixtures"), false)
+
+  const efficiency = commands.dispatchCommand({ clientId: client.id, type: "set-process-efficiency", payload: efficiencyPayload })
+  assert.equal(commands.reportResult(efficiency.id, client.id, "running"), true)
+  const efficiencyResult = JSON.stringify({
+    processId: 42, expectedPath: identity.expectedPath, expectedStartedAtUtc: identity.expectedStartedAtUtc,
+    requestedEnabled: true, initialEnabled: false, finalEnabled: true,
+    originalPriority: "normal", finalPriority: "idle", priorityRestored: false, durationMs: 20, error: null,
+  })
+  assert.equal(commands.reportResult(efficiency.id, client.id, "success", efficiencyResult), true)
+  log = db.prepare("SELECT detail FROM logs WHERE message LIKE '%上报指令%' AND detail IS NOT NULL ORDER BY rowid DESC LIMIT 1").get() as { detail: string }
+  assert.match(log.detail, /^action=efficiency;enabled=true;pathHash=[a-f0-9]{12};priorityRestored=false;resultBytes=\d+$/)
+
+  const mismatch = commands.dispatchCommand({ clientId: client.id, type: "restart-process", payload: restartPayload })
+  assert.equal(commands.reportResult(mismatch.id, client.id, "success", JSON.stringify({ ...JSON.parse(restartResult), originalProcessId: 43 })), false)
 })
 
 test("terminate-process payload and structured result survive the generic command lifecycle", () => {
