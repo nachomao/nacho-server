@@ -1,8 +1,8 @@
 {
-    "version":  "1.1.16",
-    "publishedAt":  "2026-08-10T03:29:30.0185156Z",
+    "version":  "1.1.20",
+    "publishedAt":  "2026-08-25T09:40:01.5776525Z",
     "rid":  "win-x64",
-    "sha256":  "b983ad33fd60c3100091e382b62059a93978de1179fcc2ffb0886713b25fbc3a",
-    "sizeBytes":  76361315,
-    "fileName":  "nacho-agent-1.1.16-win-x64.exe"
+    "sha256":  "c286779441b8a98190c34584a290c4e2b23f9bcf078519617fbf402df4c2ee01",
+    "sizeBytes":  76463715,
+    "fileName":  "nacho-agent-1.1.20-win-x64.exe"
 }

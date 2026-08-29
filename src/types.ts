@@ -103,6 +103,7 @@ export type Severity = "critical" | "error" | "warning" | "info"
 
 export type HealthFinding = {
   id: string
+  packageId: string | null
   host: string
   severity: Severity
   category: string
@@ -113,10 +114,12 @@ export type HealthFinding = {
   read: boolean
 }
 
-export type LogPackageStatus = "analyzed" | "analyzing" | "pending"
+export type LogPackageStatus = "collecting" | "analyzing" | "analyzed" | "failed"
 
 export type LogPackage = {
   id: string
+  clientId: string | null
+  commandId: string | null
   host: string
   category: string
   sizeMB: number
@@ -124,4 +127,13 @@ export type LogPackage = {
   ts: number
   findings: number
   status: LogPackageStatus
+  storageName: string | null
+  sizeBytes: number
+  sha256: string | null
+  sources: string[]
+  entryCount: number
+  truncated: boolean
+  error: string | null
+  analyzedAt: number | null
+  downloadable: boolean
 }

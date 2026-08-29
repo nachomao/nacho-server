@@ -20,18 +20,232 @@ const runProgramPayloadSchema = z.object({
   timeoutSeconds: z.number().int().min(1).max(900).optional(),
 }).strict()
 
-const manageServicePayloadSchema = z.object({
-  serviceName: z.string().trim().min(1).max(256),
-  action: z.enum(["query", "start", "stop", "restart"]),
-  timeoutSeconds: z.number().int().min(1).max(120).optional(),
+const serviceName = z.string().trim().min(1).max(256)
+const serviceTimeout = z.number().int().min(1).max(120).optional()
+const serviceListPayloadSchema = z.object({ action: z.literal("list") }).strict()
+const serviceQueryPayloadSchema = z.object({ serviceName, action: z.literal("query"), timeoutSeconds: serviceTimeout }).strict()
+const serviceStartPayloadSchema = z.object({ serviceName, action: z.literal("start"), timeoutSeconds: serviceTimeout }).strict()
+const serviceStopPayloadSchema = z.object({ serviceName, action: z.literal("stop"), timeoutSeconds: serviceTimeout }).strict()
+const serviceRestartPayloadSchema = z.object({ serviceName, action: z.literal("restart"), timeoutSeconds: serviceTimeout }).strict()
+export const manageServiceControlPayloadSchema = z.discriminatedUnion("action", [
+  serviceQueryPayloadSchema,
+  serviceStartPayloadSchema,
+  serviceStopPayloadSchema,
+  serviceRestartPayloadSchema,
+])
+export const manageServicePayloadSchema = z.discriminatedUnion("action", [
+  serviceListPayloadSchema,
+  serviceQueryPayloadSchema,
+  serviceStartPayloadSchema,
+  serviceStopPayloadSchema,
+  serviceRestartPayloadSchema,
+])
+
+const serviceStatusSchema = z.enum([
+  "stopped",
+  "start-pending",
+  "stop-pending",
+  "running",
+  "continue-pending",
+  "pause-pending",
+  "paused",
+  "unknown",
+])
+const serviceResourceSchema = z.object({
+  cpuPercent: z.number().min(0).max(100).nullable(),
+  workingSetBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  privateMemoryBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 }).strict()
+const serviceListItemSchema = z.object({
+  serviceName,
+  displayName: z.string().max(256),
+  status: serviceStatusSchema,
+  processId: z.number().int().positive().nullable(),
+  canControl: z.boolean(),
+  controlRestriction: z.enum(["not-allowlisted", "agent-self"]).nullable(),
+  sharedProcess: z.boolean(),
+  sharedServiceCount: z.number().int().min(0),
+  resources: serviceResourceSchema.nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.canControl !== (value.controlRestriction === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["controlRestriction"], message: "control restriction does not match canControl" })
+  }
+  if (value.sharedProcess !== (value.sharedServiceCount > 1)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["sharedProcess"], message: "shared process count is inconsistent" })
+  }
+  if (value.processId === null && (value.sharedServiceCount !== 0 || value.resources !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["processId"], message: "stopped service cannot include process resources" })
+  }
+  if (value.processId !== null && value.sharedServiceCount < 1) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["sharedServiceCount"], message: "running service must include its host count" })
+  }
+})
+const serviceListResultSchema = z.object({
+  action: z.literal("list"),
+  capturedAtUtc: z.string().datetime({ offset: true }),
+  sampleDurationMs: z.number().int().min(0),
+  total: z.number().int().min(0),
+  returned: z.number().int().min(0),
+  truncated: z.boolean(),
+  services: z.array(serviceListItemSchema),
+  error: z.string().min(1).max(512).nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.returned !== value.services.length || value.returned > value.total) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["returned"], message: "returned count is inconsistent" })
+  }
+  if (value.truncated !== (value.returned < value.total)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["truncated"], message: "truncated flag is inconsistent" })
+  }
+})
+const serviceControlResultSchema = z.object({
+  serviceName,
+  action: z.enum(["query", "start", "stop", "restart"]),
+  initialStatus: serviceStatusSchema,
+  finalStatus: serviceStatusSchema,
+  durationMs: z.number().int().min(0),
+  timedOut: z.boolean(),
+  error: z.string().min(1).max(512).nullable(),
+}).strict()
+export const manageServiceResultSchema = z.union([serviceListResultSchema, serviceControlResultSchema])
+
+export const listProcessesPayloadSchema = z.object({}).strict()
+const processResourceSchema = z.object({
+  cpuPercent: z.number().min(0).max(100).nullable(),
+  workingSetBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  privateMemoryBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict()
+const processTerminationRestrictionSchema = z.enum([
+  "system",
+  "agent-self",
+  "path-unavailable",
+  "not-allowlisted",
+])
+const processActionRestrictionSchema = z.enum([
+  "system",
+  "agent-self",
+  "path-unavailable",
+  "not-allowlisted",
+  "start-time-unavailable",
+  "session-unavailable",
+  "non-interactive-session",
+  "command-line-unavailable",
+  "access-denied",
+])
+const processListItemSchema = z.object({
+  processId: z.number().int().positive(),
+  processName: z.string().min(1).max(1024),
+  executablePath: z.string().min(1).max(32_767).nullable(),
+  startedAtUtc: z.string().datetime({ offset: true }).nullable(),
+  sessionId: z.number().int().min(0).nullable(),
+  canTerminate: z.boolean(),
+  terminationRestriction: processTerminationRestrictionSchema.nullable(),
+  canRestart: z.boolean(),
+  restartRestriction: processActionRestrictionSchema.nullable(),
+  efficiencyMode: z.boolean().nullable(),
+  canSetEfficiency: z.boolean(),
+  efficiencyRestriction: processActionRestrictionSchema.nullable(),
+  resources: processResourceSchema.nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.canTerminate !== (value.terminationRestriction === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["terminationRestriction"], message: "termination restriction does not match canTerminate" })
+  }
+  if (value.canTerminate && value.executablePath === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["executablePath"], message: "terminable process must include executablePath" })
+  }
+  if (value.terminationRestriction === "path-unavailable" && value.executablePath !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["executablePath"], message: "path-unavailable process must not include executablePath" })
+  }
+  if (value.terminationRestriction === "not-allowlisted" && value.executablePath === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["executablePath"], message: "not-allowlisted process must include executablePath" })
+  }
+  if (value.terminationRestriction === "system" && value.processId !== 4) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["processId"], message: "system restriction is reserved for PID 4" })
+  }
+  if (value.canRestart !== (value.restartRestriction === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["restartRestriction"], message: "restart restriction does not match canRestart" })
+  }
+  if (value.canRestart && (value.executablePath === null || value.startedAtUtc === null || value.sessionId === null || value.sessionId === 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["canRestart"], message: "restart-capable process identity is incomplete" })
+  }
+  if (value.canSetEfficiency !== (value.efficiencyRestriction === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["efficiencyRestriction"], message: "efficiency restriction does not match canSetEfficiency" })
+  }
+  if (value.canSetEfficiency && (value.executablePath === null || value.startedAtUtc === null || value.efficiencyMode === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["canSetEfficiency"], message: "efficiency-capable process identity is incomplete" })
+  }
+})
+export const listProcessesResultSchema = z.object({
+  capturedAtUtc: z.string().datetime({ offset: true }),
+  sampleDurationMs: z.number().int().min(0),
+  total: z.number().int().min(0),
+  returned: z.number().int().min(0),
+  truncated: z.boolean(),
+  processes: z.array(processListItemSchema),
+  error: z.string().min(1).max(512).nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.returned !== value.processes.length || value.returned > value.total) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["returned"], message: "returned count is inconsistent" })
+  }
+  if (value.truncated !== (value.returned < value.total)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["truncated"], message: "truncated flag is inconsistent" })
+  }
+})
 
 const terminateProcessPayloadSchema = z.object({
   processId: z.number().int().positive(),
   expectedPath: z.string().min(1).max(32_767),
+  expectedStartedAtUtc: z.string().datetime({ offset: true }).optional(),
   timeoutSeconds: z.number().int().min(1).max(120).optional(),
   killProcessTree: z.boolean().optional(),
 }).strict()
+
+const processIdentityPayload = {
+  processId: z.number().int().positive(),
+  expectedPath: z.string().min(1).max(32_767),
+  expectedStartedAtUtc: z.string().datetime({ offset: true }),
+}
+const restartProcessPayloadSchema = z.object({
+  ...processIdentityPayload,
+  timeoutSeconds: z.number().int().min(1).max(120),
+}).strict()
+const setProcessEfficiencyPayloadSchema = z.object({
+  ...processIdentityPayload,
+  enabled: z.boolean(),
+}).strict()
+const processActionError = z.string().min(1).max(512).nullable()
+export const restartProcessResultSchema = z.object({
+  originalProcessId: z.number().int().positive(),
+  newProcessId: z.number().int().positive().nullable(),
+  expectedPath: z.string().min(1).max(32_767),
+  expectedStartedAtUtc: z.string().datetime({ offset: true }),
+  sessionId: z.number().int().positive().nullable(),
+  phase: z.enum(["prepared", "stopped", "launched", "verified", "failed"]),
+  stopped: z.boolean(),
+  started: z.boolean(),
+  durationMs: z.number().int().min(0),
+  error: processActionError,
+}).strict().superRefine((value, context) => {
+  if (value.started !== (value.newProcessId !== null)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["newProcessId"], message: "new PID does not match started" })
+  if (value.phase === "verified" && (!value.stopped || !value.started || value.error !== null)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["phase"], message: "verified restart is inconsistent" })
+  if (value.phase === "failed" && value.error === null) context.addIssue({ code: z.ZodIssueCode.custom, path: ["error"], message: "failed restart requires error" })
+})
+const processPrioritySchema = z.enum(["idle", "below-normal", "normal", "above-normal", "high", "real-time"])
+export const setProcessEfficiencyResultSchema = z.object({
+  processId: z.number().int().positive(),
+  expectedPath: z.string().min(1).max(32_767),
+  expectedStartedAtUtc: z.string().datetime({ offset: true }),
+  requestedEnabled: z.boolean(),
+  initialEnabled: z.boolean().nullable(),
+  finalEnabled: z.boolean().nullable(),
+  originalPriority: processPrioritySchema.nullable(),
+  finalPriority: processPrioritySchema.nullable(),
+  priorityRestored: z.boolean(),
+  durationMs: z.number().int().min(0),
+  error: processActionError,
+}).strict().superRefine((value, context) => {
+  if (value.error === null && value.finalEnabled !== value.requestedEnabled) context.addIssue({ code: z.ZodIssueCode.custom, path: ["finalEnabled"], message: "final efficiency state does not match request" })
+  if (value.priorityRestored && (value.requestedEnabled || value.originalPriority === null || value.finalPriority !== value.originalPriority)) context.addIssue({ code: z.ZodIssueCode.custom, path: ["priorityRestored"], message: "priority restoration is inconsistent" })
+})
 
 const restartSystemPayloadSchema = z.object({
   delaySeconds: z.number().int().min(0).max(300),
@@ -312,7 +526,10 @@ export const panelCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run-shell"), payload: runShellPayloadSchema }).strict(),
   z.object({ type: z.literal("run-program"), payload: runProgramPayloadSchema }).strict(),
   z.object({ type: z.literal("manage-service"), payload: manageServicePayloadSchema }).strict(),
+  z.object({ type: z.literal("list-processes"), payload: listProcessesPayloadSchema }).strict(),
   z.object({ type: z.literal("terminate-process"), payload: terminateProcessPayloadSchema }).strict(),
+  z.object({ type: z.literal("restart-process"), payload: restartProcessPayloadSchema }).strict(),
+  z.object({ type: z.literal("set-process-efficiency"), payload: setProcessEfficiencyPayloadSchema }).strict(),
   z.object({ type: z.literal("restart-system"), payload: restartSystemPayloadSchema }).strict(),
   z.object({ type: z.literal("collect-logs"), payload: collectLogsPayloadSchema }).strict(),
   z.object({ type: z.literal("install-package"), payload: installPackagePayloadSchema }).strict(),
@@ -329,7 +546,7 @@ const clientIds = z.array(z.string().min(1)).min(1).max(100)
 export const batchCommandSchema = z.discriminatedUnion("type", [
   z.object({ clientIds, type: z.literal("run-shell"), payload: runShellPayloadSchema }).strict(),
   z.object({ clientIds, type: z.literal("run-program"), payload: runProgramPayloadSchema }).strict(),
-  z.object({ clientIds, type: z.literal("manage-service"), payload: manageServicePayloadSchema }).strict(),
+  z.object({ clientIds, type: z.literal("manage-service"), payload: manageServiceControlPayloadSchema }).strict(),
   z.object({ clientIds, type: z.literal("terminate-process"), payload: terminateProcessPayloadSchema }).strict(),
   z.object({ clientIds, type: z.literal("restart-system"), payload: restartSystemPayloadSchema }).strict(),
   z.object({ clientIds, type: z.literal("collect-logs"), payload: collectLogsPayloadSchema }).strict(),
@@ -344,7 +561,7 @@ export const batchCommandSchema = z.discriminatedUnion("type", [
 export type PanelCommandInput = z.infer<typeof panelCommandSchema>
 
 export function commandSupportsClient(type: string, os: string): boolean {
-  return !["manage-local-user", "manage-registry", "show-message", "open-url"].includes(type) || os === "Windows"
+  return !["manage-local-user", "manage-registry", "show-message", "open-url", "list-processes", "restart-process", "set-process-efficiency"].includes(type) || os === "Windows"
 }
 
 export function addServerCommandFields(type: string, payload: Record<string, unknown>, now = Date.now()): Record<string, unknown> {
@@ -352,4 +569,3 @@ export function addServerCommandFields(type: string, payload: Record<string, unk
     ? { ...payload, expiresAt: new Date(now + 5 * 60_000).toISOString() }
     : payload
 }
-

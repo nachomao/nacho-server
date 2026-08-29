@@ -3,7 +3,7 @@ import { shortId } from "../lib/ids"
 import type { Command, CommandStatus } from "../types"
 import { recordLog } from "./logs"
 import { pushToClient } from "./realtime"
-import { manageLocalUserResultSchema, manageRegistryResultSchema, openUrlResultSchema, showMessageResultSchema } from "../schemas/commands"
+import { listProcessesResultSchema, manageLocalUserResultSchema, manageRegistryResultSchema, manageServiceResultSchema, openUrlResultSchema, restartProcessResultSchema, setProcessEfficiencyResultSchema, showMessageResultSchema } from "../schemas/commands"
 import { createHash } from "node:crypto"
 
 export const MAX_COMMAND_RESULT_BYTES = 512 * 1024
@@ -51,11 +51,8 @@ export type NewCommand = {
   payload?: Record<string, unknown>
 }
 
-/**
- * 创建并下发一条指令：
- * 若客户端在线则实时推送，否则等待 HTTP 轮询；收到客户端 ACK 后才标记为 sent。
- */
-export function dispatchCommand(input: NewCommand): Command {
+/** 只持久化命令；批量业务可先原子创建关联记录，再统一投递。 */
+export function createCommand(input: NewCommand): Command {
   const now = Date.now()
   const cmd: Command = {
     id: shortId("cmd"),
@@ -73,14 +70,18 @@ export function dispatchCommand(input: NewCommand): Command {
     `INSERT INTO commands (id, client_id, task_id, type, payload, status, result, exit_code, created_at, updated_at)
      VALUES (@id, @clientId, @taskId, @type, @payload, @status, @result, @exitCode, @createdAt, @updatedAt)`,
   ).run({ ...cmd, payload: JSON.stringify(cmd.payload) })
+  return cmd
+}
 
-  // 套接字写入成功不代表客户端已经持久化；收到 ACK 后才标记 sent。
-  pushToClient(input.clientId, { kind: "command", command: cmd })
+/** 投递已持久化的命令并写入脱敏审计摘要。 */
+export function deliverCommand(cmd: Command): void {
+  pushToClient(cmd.clientId, { kind: "command", command: cmd })
+  const input = { type: cmd.type, payload: cmd.payload }
   const action = input.type === "manage-local-user" && typeof input.payload?.action === "string"
     ? `;action=${input.payload.action}`
     : ""
   const registryAction = input.type === "manage-registry" && typeof input.payload?.action === "string" && typeof input.payload?.subKey === "string"
-    ? `;action=${input.payload.action};hive=${input.payload.hive};view=${input.payload.view};pathHash=${createHash("sha256").update(input.payload.subKey).digest("hex").slice(0, 12)}`
+    ? `;action=${input.payload.action};hive=${input.payload.hive};view=${input.payload.view};pathHash=${createHash("sha256").update(input.payload.subKey as string).digest("hex").slice(0, 12)}`
     : ""
   const messageSummary = input.type === "show-message" && typeof input.payload?.severity === "string" ? `;severity=${input.payload.severity}` : ""
   const openUrlSummary = input.type === "open-url" && typeof input.payload?.url === "string"
@@ -91,7 +92,17 @@ export function dispatchCommand(input: NewCommand): Command {
         } catch { return ";scheme=invalid;host=invalid" }
       })()
     : ""
-  recordLog("info", "command", `向客户端 ${input.clientId} 下发指令 ${input.type}`, `commandId=${cmd.id}${action}${registryAction}${messageSummary}${openUrlSummary}`)
+  recordLog("info", "command", `向客户端 ${cmd.clientId} 下发指令 ${cmd.type}`, `commandId=${cmd.id}${action}${registryAction}${messageSummary}${openUrlSummary}`)
+}
+
+/**
+ * 创建并下发一条指令：
+ * 若客户端在线则实时推送，否则等待 HTTP 轮询；收到客户端 ACK 后才标记为 sent。
+ */
+export function dispatchCommand(input: NewCommand): Command {
+  const cmd = createCommand(input)
+  // 套接字写入成功不代表客户端已经持久化；收到 ACK 后才标记 sent。
+  deliverCommand(cmd)
   return cmd
 }
 
@@ -134,6 +145,58 @@ export function reportResult(id: string, clientId: string, status: CommandStatus
   let registrySummary: string | null = null
   let messageResultSummary: string | null = null
   let openUrlResultSummary: string | null = null
+  let serviceResultSummary: string | null = null
+  let processInventorySummary: string | null = null
+  let processActionSummary: string | null = null
+  if (row.type === "manage-service" && status !== "running" && result === undefined) return false
+  if (row.type === "manage-service" && result !== undefined) {
+    try {
+      const parsed = manageServiceResultSchema.safeParse(JSON.parse(result))
+      if (!parsed.success) return false
+      const expectedAction = safeParse(row.payload).action
+      if (parsed.data.action !== expectedAction) return false
+      if (status === "success" && parsed.data.error !== null) return false
+      if (status === "failed" && parsed.data.error === null) return false
+      const resultBytes = Buffer.byteLength(result, "utf8")
+      serviceResultSummary = parsed.data.action === "list"
+        ? `action=list;serviceCount=${parsed.data.returned};total=${parsed.data.total};truncated=${parsed.data.truncated};resultBytes=${resultBytes}`
+        : `action=${parsed.data.action};serviceNameHash=${createHash("sha256").update(parsed.data.serviceName).digest("hex").slice(0, 12)};timedOut=${parsed.data.timedOut};resultBytes=${resultBytes}`
+    } catch { return false }
+  }
+  if (row.type === "list-processes" && status !== "running" && result === undefined) return false
+  if (row.type === "list-processes" && result !== undefined) {
+    try {
+      const parsed = listProcessesResultSchema.safeParse(JSON.parse(result))
+      if (!parsed.success) return false
+      if (status === "success" && parsed.data.error !== null) return false
+      if (status === "failed" && parsed.data.error === null) return false
+      const resultBytes = Buffer.byteLength(result, "utf8")
+      processInventorySummary = `processCount=${parsed.data.returned};total=${parsed.data.total};truncated=${parsed.data.truncated};resultBytes=${resultBytes}`
+    } catch { return false }
+  }
+  if (["restart-process", "set-process-efficiency"].includes(row.type) && status !== "running" && result === undefined) return false
+  if (row.type === "restart-process" && result !== undefined) {
+    try {
+      const parsed = restartProcessResultSchema.safeParse(JSON.parse(result))
+      if (!parsed.success) return false
+      const expected = safeParse(row.payload)
+      if (parsed.data.originalProcessId !== expected.processId || parsed.data.expectedPath !== expected.expectedPath || parsed.data.expectedStartedAtUtc !== expected.expectedStartedAtUtc) return false
+      if (status === "success" && (parsed.data.phase !== "verified" || parsed.data.error !== null)) return false
+      if (status === "failed" && parsed.data.error === null) return false
+      processActionSummary = `action=restart;pathHash=${createHash("sha256").update(parsed.data.expectedPath).digest("hex").slice(0, 12)};stopped=${parsed.data.stopped};started=${parsed.data.started};resultBytes=${Buffer.byteLength(result, "utf8")}`
+    } catch { return false }
+  }
+  if (row.type === "set-process-efficiency" && result !== undefined) {
+    try {
+      const parsed = setProcessEfficiencyResultSchema.safeParse(JSON.parse(result))
+      if (!parsed.success) return false
+      const expected = safeParse(row.payload)
+      if (parsed.data.processId !== expected.processId || parsed.data.expectedPath !== expected.expectedPath || parsed.data.expectedStartedAtUtc !== expected.expectedStartedAtUtc || parsed.data.requestedEnabled !== expected.enabled) return false
+      if (status === "success" && parsed.data.error !== null) return false
+      if (status === "failed" && parsed.data.error === null) return false
+      processActionSummary = `action=efficiency;enabled=${parsed.data.requestedEnabled};pathHash=${createHash("sha256").update(parsed.data.expectedPath).digest("hex").slice(0, 12)};priorityRestored=${parsed.data.priorityRestored};resultBytes=${Buffer.byteLength(result, "utf8")}`
+    } catch { return false }
+  }
   if (row.type === "manage-local-user" && status !== "running" && result === undefined) return false
   if (row.type === "manage-local-user" && result !== undefined) {
     try {
@@ -188,9 +251,14 @@ export function reportResult(id: string, clientId: string, status: CommandStatus
     } catch { return false }
   }
   updateStatus(id, status, result, exitCode)
+  if (row.type === "collect-logs" && status !== "running") {
+    // 延迟加载避免 health -> commands 的模块初始化环；未关联健康包时该函数保持空操作。
+    const health = require("./health") as typeof import("./health")
+    health.processCollectLogsReport(id, clientId, status, result)
+  }
   const level = status === "failed" ? "error" : "info"
-  const summarizedResults = new Set(["collect-logs", "run-shell", "install-package", "deploy-file", "rollback-file-deploy", "manage-local-user", "manage-registry", "show-message", "open-url"])
-  const detail = localUserSummary ?? registrySummary ?? messageResultSummary ?? openUrlResultSummary ?? (summarizedResults.has(row.type) && result !== undefined
+  const summarizedResults = new Set(["collect-logs", "run-shell", "install-package", "deploy-file", "rollback-file-deploy", "manage-local-user", "manage-registry", "manage-service", "list-processes", "restart-process", "set-process-efficiency", "show-message", "open-url"])
+  const detail = serviceResultSummary ?? processInventorySummary ?? processActionSummary ?? localUserSummary ?? registrySummary ?? messageResultSummary ?? openUrlResultSummary ?? (summarizedResults.has(row.type) && result !== undefined
     ? `resultBytes=${Buffer.byteLength(result, "utf8")};exitCode=${exitCode ?? "none"}`
     : result)
   recordLog(level, "command", `客户端 ${clientId} 上报指令 ${id} 执行结果：${status}`, detail)

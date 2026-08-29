@@ -18,6 +18,7 @@ public sealed class AgentWorker(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        CleanupHistoricalBackups();
         await EnrollWithRetryAsync(stoppingToken);
         await processor.RecoverAsync(stoppingToken);
 
@@ -26,6 +27,20 @@ public sealed class AgentWorker(
             HeartbeatLoopAsync(stoppingToken),
             PollLoopAsync(stoppingToken),
             ReportRetryLoopAsync(stoppingToken));
+    }
+
+    private void CleanupHistoricalBackups()
+    {
+        try
+        {
+            var installPath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(installPath)) return;
+            var backupRoot = AgentUpdater.ResolveHistoricalBackupDirectory(installPath);
+            var result = AgentUpdater.CleanupHistoricalBackups(backupRoot, _options.UpdateBackupRetentionCount, _options.UpdateBackupMaxBytes);
+            if (result.Deleted > 0)
+                logger.LogInformation("Historical update backups cleaned: {Deleted} directories, {RemainingBytes} bytes remain", result.Deleted, result.RemainingBytes);
+        }
+        catch (Exception ex) { logger.LogWarning(ex, "Historical update backup cleanup failed"); }
     }
 
     private async Task EnrollWithRetryAsync(CancellationToken cancellationToken)

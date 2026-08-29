@@ -12,7 +12,12 @@ function Test-Administrator {
 }
 
 if (-not (Test-Administrator)) {
-  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& { irm '$ServerUrl/uninstall.ps1' | iex }"))
+  if ($Purge) {
+    $elevatedCommand = "& { & ([scriptblock]::Create((irm '$ServerUrl/uninstall.ps1'))) -Purge }"
+  } else {
+    $elevatedCommand = "& { irm '$ServerUrl/uninstall.ps1' | iex }"
+  }
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedCommand))
   Start-Process powershell.exe -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
   exit $LASTEXITCODE
 }

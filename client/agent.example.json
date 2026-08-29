@@ -22,6 +22,8 @@
   "fileDeployBackupRetentionDays": 7,
   "allowSystemRestart": false,
   "allowLogCollection": false,
+  "updateBackupRetentionCount": 2,
+  "updateBackupMaxBytes": 1073741824,
   "allowedServices": [],
   "allowedProcessPaths": [],
   "allowedPrograms": [

@@ -29,6 +29,10 @@ public sealed class AgentOptions
     public bool AllowSystemRestart { get; init; }
     public bool AllowLogCollection { get; init; }
     public bool AllowAgentUpdate { get; init; } = true;
+    /// <summary>保留的历史 Agent 更新备份目录数量。0 表示不保留历史目录。</summary>
+    public int UpdateBackupRetentionCount { get; init; } = 2;
+    /// <summary>历史 Agent 更新备份目录的总容量上限（字节）。</summary>
+    public long UpdateBackupMaxBytes { get; init; } = 1L * 1024 * 1024 * 1024;
 }
 
 public sealed class AgentPaths(string dataDirectory)
@@ -43,6 +47,8 @@ public sealed class AgentPaths(string dataDirectory)
     public string FileDeploymentsDirectory => Path.Combine(DataDirectory, "file-deployments");
     public string MessageIntentsDirectory => Path.Combine(DataDirectory, "message-intents");
     public string OpenUrlIntentsDirectory => Path.Combine(DataDirectory, "open-url-intents");
+    public string ProcessRestartsDirectory => Path.Combine(DataDirectory, "process-restarts");
+    public string ProcessEfficiencyStateFile => Path.Combine(DataDirectory, "process-efficiency-state.json");
     public string MessagePushPolicyMigrationFile => Path.Combine(DataDirectory, "message-push-policy-v1.migrated.json");
     public string MessagePushPolicyBackupFile => Path.Combine(DataDirectory, "agent.json.before-message-push-enable.bak");
     public string OpenUrlPolicyRemovalFile => Path.Combine(DataDirectory, "open-url-policy-v1.removed.json");
@@ -59,6 +65,7 @@ public sealed class AgentPaths(string dataDirectory)
     public string FileDeployIntentFile(string commandId) => Path.Combine(FileDeploymentsDirectory, commandId, "intent.json");
     public string MessageIntentFile(string commandId) => Path.Combine(MessageIntentsDirectory, commandId + ".json");
     public string OpenUrlIntentFile(string commandId) => Path.Combine(OpenUrlIntentsDirectory, commandId + ".json");
+    public string ProcessRestartIntentFile(string commandId) => Path.Combine(ProcessRestartsDirectory, commandId + ".dat");
 
     public static string ResolveDataDirectory(string[] args)
     {
