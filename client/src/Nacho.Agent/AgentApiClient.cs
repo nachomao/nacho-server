@@ -24,6 +24,8 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
 
     public AgentState? CurrentState => _stateStore.Load();
 
+    public void ResetEnrollment() => _stateStore.Reset();
+
     public async Task<AgentState> EnsureEnrolledAsync(CancellationToken cancellationToken)
     {
         var state = _stateStore.Load();
@@ -32,6 +34,8 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
         var body = new
         {
             enrollmentKey = _stateStore.ReadEnrollmentKey(),
+            // 卸载/清理后重新安装仍复用服务端客户端 id；服务端对重复 id 做幂等更新。
+            id = DeviceIdentity.GetStableId(),
             name = string.IsNullOrWhiteSpace(_options.Name) ? Environment.MachineName : _options.Name,
             hostname = Environment.MachineName,
             os = "Windows",

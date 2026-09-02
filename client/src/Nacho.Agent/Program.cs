@@ -1,10 +1,42 @@
 using Nacho.Agent;
+using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
 var dataDirectory = AgentPaths.ResolveDataDirectory(args);
 Directory.CreateDirectory(dataDirectory);
+
+// 由卸载脚本在停止服务前调用：使用本地 DPAPI 状态通知服务端移除设备记录。
+if (args.Contains("--unregister", StringComparer.Ordinal) || args.Contains("--mark-unregistered", StringComparer.Ordinal))
+{
+    try
+    {
+        var paths = new AgentPaths(dataDirectory);
+        var state = new StateStore(paths).Load();
+        if (state is null) return;
+        var configPath = Path.Combine(dataDirectory, "agent.json");
+        using var config = JsonDocument.Parse(File.ReadAllText(configPath));
+        var serverUrl = config.RootElement.GetProperty("serverUrl").GetString()?.TrimEnd('/')
+            ?? throw new InvalidDataException("Agent serverUrl is missing.");
+        using var http = new HttpClient { BaseAddress = new Uri(serverUrl + "/"), Timeout = TimeSpan.FromSeconds(15) };
+        var markOnly = args.Contains("--mark-unregistered", StringComparer.Ordinal);
+        using var request = new HttpRequestMessage(markOnly ? HttpMethod.Post : HttpMethod.Delete,
+            markOnly ? "agent/client/unregister" : "agent/client");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", state.Token);
+        using var response = await http.SendAsync(request);
+        if (!response.IsSuccessStatusCode && (int)response.StatusCode != 404)
+            throw new HttpRequestException($"Server returned {(int)response.StatusCode}.");
+        return;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Agent {(args.Contains("--mark-unregistered", StringComparer.Ordinal) ? "mark-unregistered" : "unregister")} failed: {ex.Message}");
+        Environment.ExitCode = 1;
+        return;
+    }
+}
 
 if (args.Contains("--apply-update", StringComparer.Ordinal))
 {

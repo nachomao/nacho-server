@@ -41,20 +41,20 @@ TRUST_PROXY=false
 在管理员 PowerShell 中运行；普通 PowerShell 会自动触发 UAC 提权：
 
 ```powershell
-irm http://SERVER:PORT/install.ps1 | iex
+irm http://SERVER:PORT/nacho.ps1 | iex
 ```
 
-服务端可维护多个安装档案。裸 `/install.ps1` 使用默认档案；指定档案使用：
+服务端可维护多个安装档案。裸 `/nacho.ps1` 使用默认档案；指定档案使用：
 
 ```powershell
-irm "http://SERVER:PORT/install.ps1?profile=PROFILE_ID" | iex
+irm "http://SERVER:PORT/nacho.ps1?profile=PROFILE_ID" | iex
 ```
 
 档案保存 `menu` 或 `silent` 默认模式，以及 Agent 连接地址、心跳、HTTP 回退轮询、名称、分组和标签。一次性覆盖模式可使用：
 
 ```powershell
-& { $env:NACHO_INSTALL_MODE='menu'; irm "http://SERVER:PORT/install.ps1?profile=PROFILE_ID" | iex }
-& { $env:NACHO_INSTALL_MODE='silent'; irm "http://SERVER:PORT/install.ps1?profile=PROFILE_ID" | iex }
+& { $env:NACHO_INSTALL_MODE='menu'; irm "http://SERVER:PORT/nacho.ps1?profile=PROFILE_ID" | iex }
+& { $env:NACHO_INSTALL_MODE='silent'; irm "http://SERVER:PORT/nacho.ps1?profile=PROFILE_ID" | iex }
 ```
 
 `silent` 自动选择安装、跳过菜单和失败暂停，仅保留最终结果与 `install.log`；普通用户启动时仍会显示 Windows UAC。关闭开放入网时，静默部署继续通过当前进程的 `NACHO_ENROLLMENT_KEY` 提供密钥，档案和 URL 均不保存该凭据。

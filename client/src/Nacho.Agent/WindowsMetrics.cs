@@ -11,11 +11,14 @@ public sealed class WindowsMetrics
 
     public ClientMetrics Read()
     {
-        var cpu = ReadCpu();
-        var memory = ReadMemory();
-        var disk = ReadDisk();
+        // 心跳指标统一保留两位小数，避免面板把多位浮点数挤在同一行。
+        var cpu = RoundPercent(ReadCpu());
+        var memory = RoundPercent(ReadMemory());
+        var disk = RoundPercent(ReadDisk());
         return new ClientMetrics(cpu, memory, disk, Environment.TickCount64 / 1000);
     }
+
+    private static double RoundPercent(double value) => Math.Round(Math.Clamp(value, 0, 100), 2, MidpointRounding.AwayFromZero);
 
     private double ReadCpu()
     {

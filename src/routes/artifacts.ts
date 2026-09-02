@@ -15,7 +15,7 @@ function externalBaseUrl(req: Request): string {
   return `${req.protocol}://${forwardedHost || req.get("host")}`
 }
 
-function readScript(name: "install.ps1" | "uninstall.ps1"): string | null {
+function readScript(name: "nacho.ps1" | "uninstall.ps1"): string | null {
   const file = path.join(config.rootDir, "deploy", "windows", name)
   if (!fs.existsSync(file)) return null
   // UTF-8 BOM 对落盘执行有帮助，但 readFileSync(..., "utf8") 会把它保留为
@@ -24,8 +24,8 @@ function readScript(name: "install.ps1" | "uninstall.ps1"): string | null {
   return stripScriptBom(fs.readFileSync(file, "utf8"))
 }
 
-artifactRouter.get("/install.ps1", (req, res) => {
-  const template = readScript("install.ps1")
+artifactRouter.get("/nacho.ps1", (req, res) => {
+  const template = readScript("nacho.ps1")
   if (!template) return fail(res, "Windows Agent 安装脚本尚未发布", 503)
   if (req.query.profile !== undefined && typeof req.query.profile !== "string") {
     return fail(res, "安装档案参数无效", 400)
@@ -34,7 +34,7 @@ artifactRouter.get("/install.ps1", (req, res) => {
   const profile = profileId ? installProfiles.getProfile(profileId) : installProfiles.getDefaultProfile()
   if (!profile) return fail(res, "安装档案不存在", 404)
   const artifactBaseUrl = externalBaseUrl(req).replace(/\/$/, "")
-  const installScriptUrl = `${artifactBaseUrl}/install.ps1?profile=${encodeURIComponent(profile.id)}`
+  const installScriptUrl = `${artifactBaseUrl}/nacho.ps1?profile=${encodeURIComponent(profile.id)}`
   const script = renderInstallScript(template, {
     artifactBaseUrl,
     installScriptUrl,

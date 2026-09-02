@@ -35,6 +35,12 @@ public sealed class StateStore(AgentPaths paths)
         if (File.Exists(paths.EnrollmentKeyFile)) File.Delete(paths.EnrollmentKeyFile);
     }
 
+    public void Reset()
+    {
+        _cached = null;
+        if (File.Exists(paths.StateFile)) File.Delete(paths.StateFile);
+    }
+
     private static void WriteAtomic(string path, byte[] bytes)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);

@@ -67,7 +67,7 @@ npm run build && npm start
 
 支持 Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Fedora。脚本会自动安装 Node、创建系统用户、编译代码、生成随机密钥、安装并启动 systemd 服务、放行防火墙端口。
 
-部署脚本会校验并复制 `artifacts/windows` 与 `deploy/windows`，因此 Linux 服务端安装完成后会同时提供 `irm http://SERVER:PORT/install.ps1 | iex`。发布服务端前应先运行 `server/client/deploy/publish.ps1` 生成并校验 Windows Agent 制品。
+部署脚本会校验并复制 `artifacts/windows` 与 `deploy/windows`，因此 Linux 服务端安装完成后会同时提供 `irm http://SERVER:PORT/nacho.ps1 | iex`。发布服务端前应先运行 `server/client/deploy/publish.ps1` 生成并校验 Windows Agent 制品。
 
 ```bash
 cd server
@@ -173,7 +173,7 @@ Windows Agent 安装与制品接口：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/install.ps1[?profile=PROFILE_ID]` | 按默认或指定安装档案动态生成 Windows 安装脚本 |
+| GET | `/nacho.ps1[?profile=PROFILE_ID]` | 按默认或指定安装档案动态生成 Windows 安装脚本 |
 | GET | `/uninstall.ps1` | Windows 卸载脚本 |
 | GET | `/agent/downloads/windows/latest.json` | 当前 Windows Agent 版本与 SHA-256 清单 |
 | GET | `/agent/downloads/windows/:file` | Windows Agent 单文件制品 |
@@ -332,7 +332,7 @@ curl -s http://SERVER:PORT/api/panel/clients \
   -H "Authorization: Bearer $PANEL_API_KEY"
 ```
 
-Windows 安装链接固定为 `http://SERVER:PORT/install.ps1`，与控制服务端共用地址和端口，不需要额外开放下载端口。
+Windows 安装链接固定为 `http://SERVER:PORT/nacho.ps1`，与控制服务端共用地址和端口，不需要额外开放下载端口。
 
 ## Windows 系统重启说明
 

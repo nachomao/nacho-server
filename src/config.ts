@@ -1,4 +1,5 @@
 import path from "node:path"
+import fs from "node:fs"
 import dotenv from "dotenv"
 
 // 优先加载 .env（部署脚本会生成到服务端根目录）
@@ -14,7 +15,12 @@ function bool(value: string | undefined, fallback = false): boolean {
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase())
 }
 
-const rootDir = path.resolve(__dirname, "..")
+// 构建产物位于 dist/，部署目录（deploy、artifacts）位于项目根目录；开发运行时
+// __dirname 已经是 src，因此统一探测包含 deploy 目录的根路径。
+const rootDir = (() => {
+  const candidates = [path.resolve(__dirname, ".."), path.resolve(__dirname, "../..")]
+  return candidates.find((candidate) => path.basename(candidate) !== "dist" && fs.existsSync(path.join(candidate, "deploy"))) ?? candidates[0]
+})()
 const databasePath = path.isAbsolute(process.env.DATABASE_PATH || "")
   ? (process.env.DATABASE_PATH as string)
   : path.resolve(rootDir, process.env.DATABASE_PATH || "./data/nacho.db")

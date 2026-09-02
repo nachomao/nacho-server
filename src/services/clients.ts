@@ -1,9 +1,11 @@
+import fs from "node:fs"
+import path from "node:path"
 import { config } from "../config"
 import { db } from "../db"
 import { makeToken, shortId } from "../lib/ids"
 import type { Client, ClientMetrics, ClientOS, ClientStatus } from "../types"
 import { recordLog } from "./logs"
-import { isClientConnected } from "./realtime"
+import { isClientConnected, removeConnection } from "./realtime"
 
 type ClientRow = {
   id: string
@@ -49,8 +51,15 @@ function parseArr(s: string): string[] {
   }
 }
 
+/** 将心跳中的百分比限制在 0~100 并保留两位小数，避免长浮点值进入面板。 */
+function normalizeMetrics(metrics: ClientMetrics): ClientMetrics {
+  const percent = (value: number) => Math.round(Math.min(100, Math.max(0, Number.isFinite(value) ? value : 0)) * 100) / 100
+  return { ...metrics, cpu: percent(metrics.cpu), memory: percent(metrics.memory), disk: percent(metrics.disk) }
+}
+
 /** 根据心跳时间与存储状态计算实时在线状态 */
 function computeStatus(r: ClientRow): ClientStatus {
+  if (r.status === "unregistered") return "unregistered"
   if (r.status === "warning") {
     // 告警状态下仍要判断是否已离线
     if (Date.now() - r.last_seen > config.offlineThreshold * 1000) return "offline"
@@ -87,8 +96,9 @@ export type RegisterInput = {
 /** 客户端注册：返回带 token 的客户端记录（token 仅注册时返回一次） */
 export function registerClient(input: RegisterInput): { client: Client; token: string } {
   const now = Date.now()
-  const existing = input.id
-    ? (db.prepare("SELECT * FROM clients WHERE id = ?").get(input.id) as ClientRow | undefined)
+  const requestedId = input.id?.trim() || undefined
+  const existing = requestedId
+    ? (db.prepare("SELECT * FROM clients WHERE id = ?").get(requestedId) as ClientRow | undefined)
     : undefined
 
   ensureGroup(input.group || "默认分组")
@@ -115,7 +125,8 @@ export function registerClient(input: RegisterInput): { client: Client; token: s
     return { client: getClient(existing.id)!, token }
   }
 
-  const id = shortId("cl")
+  // Agent 提供稳定设备 id 时执行幂等注册；旧版或手动录入继续生成随机 id。
+  const id = requestedId || shortId("cl")
   const token = makeToken()
   db.prepare(
     `INSERT INTO clients (id, name, hostname, ip, os, os_name, status, tags, grp, version, token, last_seen, registered_at, metrics)
@@ -147,7 +158,7 @@ export function heartbeat(id: string, metrics?: ClientMetrics, ip?: string, vers
   ).run({
     id,
     now: Date.now(),
-    metrics: metrics ? JSON.stringify(metrics) : null,
+    metrics: metrics ? JSON.stringify(normalizeMetrics(metrics)) : null,
     ip: ip ?? null,
     version: version ?? null,
     osName: osName ?? null,
@@ -181,6 +192,48 @@ export function updateClient(id: string, patch: Partial<Pick<Client, "name" | "t
 export function deleteClient(id: string): boolean {
   const info = db.prepare("DELETE FROM clients WHERE id = ?").run(id)
   db.prepare("DELETE FROM commands WHERE client_id = ?").run(id)
+  return info.changes > 0
+}
+
+/** 彻底注销客户端，并删除所有直接关联的服务端数据。 */
+export function unregisterClient(id: string): boolean {
+  if (!db.prepare("SELECT 1 FROM clients WHERE id=?").get(id)) return false
+
+  const packages = db.prepare("SELECT id, storage_name FROM log_packages WHERE client_id=?").all(id) as Array<{ id: string; storage_name: string | null }>
+  const deploymentBatchIds = db.prepare("SELECT DISTINCT batch_id FROM deployment_items WHERE client_id=?").all(id) as Array<{ batch_id: string }>
+  const tasks = db.prepare("SELECT id, client_ids FROM tasks").all() as Array<{ id: string; client_ids: string }>
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    for (const item of tasks) {
+      const ids = parseArr(item.client_ids)
+      if (ids.includes(id)) db.prepare("UPDATE tasks SET client_ids=?, updated_at=? WHERE id=?").run(JSON.stringify(ids.filter((value) => value !== id)), Date.now(), item.id)
+    }
+    for (const item of packages) db.prepare("DELETE FROM health_findings WHERE package_id=?").run(item.id)
+    db.prepare("DELETE FROM log_packages WHERE client_id=?").run(id)
+    db.prepare("DELETE FROM deployment_items WHERE client_id=?").run(id)
+    db.prepare("DELETE FROM commands WHERE client_id = ?").run(id)
+    for (const item of deploymentBatchIds) {
+      db.prepare("DELETE FROM deployment_batches WHERE id=? AND NOT EXISTS (SELECT 1 FROM deployment_items WHERE deployment_items.batch_id=deployment_batches.id)").run(item.batch_id)
+    }
+    db.prepare("DELETE FROM logs WHERE instr(COALESCE(message, ''), ?) > 0 OR instr(COALESCE(detail, ''), ?) > 0").run(id, id)
+    db.prepare("DELETE FROM clients WHERE id=?").run(id)
+    db.exec("COMMIT")
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
+
+  for (const item of packages) {
+    if (!item.storage_name || !/^p-[a-z0-9-]+\.json$/i.test(item.storage_name)) continue
+    fs.rmSync(path.join(config.healthArtifactsPath, item.storage_name), { force: true })
+  }
+  removeConnection(id)
+  return true
+}
+
+/** 标记客户端已注销但保留卡片、令牌和历史数据，供普通卸载使用。 */
+export function markClientUnregistered(id: string): boolean {
+  const info = db.prepare("UPDATE clients SET status='unregistered', last_seen=0 WHERE id=?").run(id)
   return info.changes > 0
 }
 

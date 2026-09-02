@@ -3,7 +3,7 @@
 // ------------------------------------------------------------------
 
 export type ClientOS = "Windows" | "macOS" | "Linux"
-export type ClientStatus = "online" | "offline" | "warning"
+export type ClientStatus = "online" | "offline" | "warning" | "unregistered"
 
 /** 受管理设备（客户端 / Agent） */
 export type Client = {

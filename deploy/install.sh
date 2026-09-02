@@ -288,7 +288,7 @@ summary() {
   echo "  注册密钥    : $(grep '^ENROLLMENT_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
   echo
   echo "  健康检查    : curl http://${ip:-127.0.0.1}:${PORT}/health"
-  echo "  Windows Agent: irm http://${ip:-127.0.0.1}:${PORT}/install.ps1 | iex"
+  echo "  Windows Agent: irm http://${ip:-127.0.0.1}:${PORT}/nacho.ps1 | iex"
   echo "  查看日志    : journalctl -u ${APP_NAME} -f"
   echo "  重启服务    : systemctl restart ${APP_NAME}"
   echo

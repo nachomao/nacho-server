@@ -57,7 +57,7 @@ const OFFLINE_SWEEP_MS = 15_000
 setInterval(() => {
   const threshold = Date.now() - config.offlineThreshold * 1000
   const info = db
-    .prepare("UPDATE clients SET status = 'offline' WHERE status != 'offline' AND last_seen < ? AND last_seen > 0")
+    .prepare("UPDATE clients SET status = 'offline' WHERE status NOT IN ('offline', 'unregistered') AND last_seen < ? AND last_seen > 0")
     .run(threshold)
   if (info.changes > 0) {
     logger.info(`已将 ${info.changes} 台超时客户端标记为离线`)

@@ -70,7 +70,7 @@ test("profile restore switches the active snapshot without changing revision his
   assert.deepEqual(profiles.listRevisions(created.id).map((item) => item.revision), [7, 6, 5, 4, 3, 2, 1])
   assert.equal(renderInstallScript("$ProfileRevision = __NACHO_PROFILE_REVISION__", {
     artifactBaseUrl: "https://artifacts.example.test",
-    installScriptUrl: `https://artifacts.example.test/install.ps1?profile=${restored.id}`,
+    installScriptUrl: `https://artifacts.example.test/nacho.ps1?profile=${restored.id}`,
     openEnrollment: false,
     profile: restored,
   }), "$ProfileRevision = 5")
@@ -125,7 +125,7 @@ test("rendered script separates artifact and Agent URLs and escapes profile text
   ].join("\n")
   const output = renderInstallScript(template, {
     artifactBaseUrl: "https://artifacts.example.test",
-    installScriptUrl: `https://artifacts.example.test/install.ps1?profile=${profile.id}`,
+    installScriptUrl: `https://artifacts.example.test/nacho.ps1?profile=${profile.id}`,
     openEnrollment: false,
     profile,
   })

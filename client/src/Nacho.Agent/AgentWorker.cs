@@ -125,6 +125,12 @@ public sealed class AgentWorker(
                 var health = new UpdateHealth(AgentUpdater.CurrentVersion, DateTimeOffset.UtcNow);
                 AgentUpdater.WriteAtomic(paths.UpdateHealthFile, health, AgentJsonContext.Default.UpdateHealth);
             }
+            catch (HttpRequestException ex) when (ex.Message.Contains("401", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("访问令牌无效", StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning(ex, "Heartbeat rejected; clearing local enrollment state and retrying enrollment");
+                try { api.ResetEnrollment(); await EnrollWithRetryAsync(cancellationToken); }
+                catch (Exception resetEx) when (resetEx is not OperationCanceledException) { logger.LogError(resetEx, "Automatic re-enrollment failed"); }
+            }
             catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "Heartbeat failed"); }
         } while (await timer.WaitForNextTickAsync(cancellationToken));
     }

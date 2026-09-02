@@ -3,6 +3,7 @@ import { Router } from "express"
 import { z } from "zod"
 import { agentAuth, canEnroll } from "../lib/auth"
 import { asyncHandler, fail, ok, parseBody } from "../lib/http"
+import { logger } from "../lib/logger"
 import * as clients from "../services/clients"
 import * as commands from "../services/commands"
 import { MAX_COMMAND_RESULT_BYTES } from "../services/commands"
@@ -37,6 +38,10 @@ agentRouter.post(
   asyncHandler((req, res) => {
     const body = parseBody(enrollSchema, req.body)
     if (!canEnroll(body.enrollmentKey)) {
+      // 仅记录定位注册请求所需的元数据，绝不把入网密钥写入日志。
+      const detail = `ip=${JSON.stringify(clientIp(req))};id=${JSON.stringify(body.id ?? "")};name=${JSON.stringify(body.name)};hostname=${JSON.stringify(body.hostname ?? "")}`
+      logger.warn(`客户端注册被拒绝：入网密钥无效；${detail}`)
+      recordLog("warn", "client", "客户端注册被拒绝：入网密钥无效", detail)
       return fail(res, "入网密钥无效，拒绝注册", 401)
     }
     const { client, token } = clients.registerClient({
@@ -57,6 +62,31 @@ agentRouter.post(
 
 /* -------------------- 以下接口需要客户端令牌 -------------------- */
 agentRouter.use(agentAuth)
+
+/**
+ * Agent 自注销：彻底卸载时由本机脚本携带设备令牌调用，删除服务端设备及关联数据。
+ * 普通卸载（保留数据）不调用此接口，因此设备仍会以 offline 状态保留在面板中。
+ */
+agentRouter.delete(
+  "/client",
+  asyncHandler((req, res) => {
+    const clientId = (req as Request & { clientId: string }).clientId
+    if (!clients.unregisterClient(clientId)) return fail(res, "客户端不存在", 404)
+    recordLog("info", "client", "客户端通过卸载流程完成彻底清理")
+    return ok(res, { id: clientId, deleted: true })
+  }),
+)
+
+/** 普通卸载：保留服务端卡片和历史数据，仅标记为已注销。 */
+agentRouter.post(
+  "/client/unregister",
+  asyncHandler((req, res) => {
+    const clientId = (req as Request & { clientId: string }).clientId
+    if (!clients.markClientUnregistered(clientId)) return fail(res, "客户端不存在", 404)
+    recordLog("info", "client", "客户端通过普通卸载流程标记为已注销", `id=${clientId}`)
+    return ok(res, { id: clientId, status: "unregistered" })
+  }),
+)
 
 agentRouter.get(
   "/managed-artifacts/:artifactId",

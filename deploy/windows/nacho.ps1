@@ -1,5 +1,7 @@
 ﻿param(
-  [string]$RunMode
+  [string]$RunMode,
+  [string]$EnrollmentKey,
+  [string]$ClientAction
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,8 +40,11 @@ if ([string]::IsNullOrWhiteSpace($effectiveRunMode)) { $effectiveRunMode = $Prof
 $silent = $effectiveRunMode -eq 'silent'
 if ($silent) { $ProgressPreference = 'SilentlyContinue' }
 
-$ClientAction = $env:NACHO_CLIENT_ACTION
-if ($ClientAction -notin @('install', 'uninstall', 'purge')) {
+if (-not [string]::IsNullOrWhiteSpace($ClientAction) -and $ClientAction -notin @('install', 'uninstall', 'purge')) {
+  throw "ClientAction must be install, uninstall, or purge."
+}
+
+if ([string]::IsNullOrWhiteSpace($ClientAction)) {
   if ($silent) {
     $ClientAction = 'install'
   } else {
@@ -48,13 +53,13 @@ if ($ClientAction -notin @('install', 'uninstall', 'purge')) {
     Write-Host '1. Install / upgrade client'
     Write-Host '2. Uninstall client (keep data)'
     Write-Host '3. Uninstall client and purge all data'
-    Write-Host '0. Exit'
+    Write-Host '4. Exit'
     $selection = Read-Host 'Select an action'
     switch ($selection) {
       '1' { $ClientAction = 'install' }
       '2' { $ClientAction = 'uninstall' }
       '3' { $ClientAction = 'purge' }
-      '0' { Write-Host 'Exited.'; return }
+      '4' { Write-Host 'Exited.'; return }
       '' { $ClientAction = 'install' }
       default { throw 'Invalid menu selection.' }
     }
@@ -86,9 +91,12 @@ function Normalize-ServerUrl([string]$value) {
 
 if (-not (Test-Administrator)) {
   $actionLiteral = $ClientAction.Replace("'", "''")
-  $modeLiteral = $effectiveRunMode.Replace("'", "''")
   $scriptLiteral = $InstallScriptUrl.Replace("'", "''")
-  $elevatedCommand = "& { `$env:NACHO_CLIENT_ACTION = '$actionLiteral'; `$env:NACHO_INSTALL_MODE = '$modeLiteral'; irm '$scriptLiteral' | iex }"
+  $keyForElevation = $EnrollmentKey
+  if ([string]::IsNullOrWhiteSpace($keyForElevation)) { $keyForElevation = $env:NACHO_ENROLLMENT_KEY }
+  $keyLiteral = ([string]$keyForElevation).Replace("'", "''")
+  $elevatedScriptUrl = "$scriptLiteral&elevated=1"
+  $elevatedCommand = "& { `$script = [scriptblock]::Create((irm '$elevatedScriptUrl')); & `$script -RunMode 'silent' -ClientAction '$actionLiteral' -EnrollmentKey '$keyLiteral' }"
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedCommand))
   $elevated = Start-Process powershell.exe -Verb RunAs -Wait -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
   if ($elevated.ExitCode -ne 0) {
@@ -131,7 +139,8 @@ try {
   $needsEnrollment = $reEnroll -or -not (Test-Path $stateFile)
 
   if ($needsEnrollment -and -not $OpenEnrollment) {
-    $enrollmentKey = $env:NACHO_ENROLLMENT_KEY
+    $enrollmentKey = $EnrollmentKey
+    if ([string]::IsNullOrWhiteSpace($enrollmentKey)) { $enrollmentKey = $env:NACHO_ENROLLMENT_KEY }
     if ([string]::IsNullOrWhiteSpace($enrollmentKey) -and -not $silent) {
       $secure = Read-Host 'Enrollment key' -AsSecureString
       $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
@@ -294,3 +303,4 @@ try {
   }
   Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
 }
+

@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
+import express from "express"
 import { DatabaseSync } from "node:sqlite"
 import { after, before, test } from "node:test"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
@@ -13,6 +14,8 @@ let clients: typeof import("../services/clients")
 let commands: typeof import("../services/commands")
 let canEnroll: typeof import("../lib/auth").canEnroll
 let agentUpdates: typeof import("../services/agent-updates")
+let agentRouter: typeof import("../routes/agent").agentRouter
+let logs: typeof import("../services/logs")
 const artifactsPath = path.join(process.cwd(), "tmp-update-artifacts")
 
 before(async () => {
@@ -56,6 +59,8 @@ before(async () => {
   clients = await import("../services/clients")
   commands = await import("../services/commands")
   ;({ canEnroll } = await import("../lib/auth"))
+  ;({ agentRouter } = await import("../routes/agent"))
+  logs = await import("../services/logs")
   agentUpdates = await import("../services/agent-updates")
   initSchema()
 })
@@ -64,6 +69,124 @@ test("open enrollment bypasses the shared key only when configured", () => {
   assert.equal(canEnroll(undefined, true), true)
   assert.equal(canEnroll(undefined, false), false)
   assert.equal(canEnroll("integration-enroll-key", false), true)
+})
+
+test("enrollment with the same device id updates one client record", () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients; DELETE FROM logs")
+  const first = clients.registerClient({
+    id: "device-fixture-stable",
+    name: "fixture-device",
+    hostname: "fixture-host",
+    os: "Windows",
+    version: "1.0.0",
+  })
+  const second = clients.registerClient({
+    id: "device-fixture-stable",
+    name: "fixture-device-renamed",
+    hostname: "fixture-host",
+    os: "Windows",
+    version: "1.1.0",
+  })
+
+  assert.equal(second.client.id, first.client.id)
+  assert.equal(second.token, first.token)
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM clients").get() as { count: number }).count, 1)
+  assert.equal(clients.getClient(first.client.id)?.version, "1.1.0")
+})
+
+test("agent unregister purges the server-side client record and related data", async () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients; DELETE FROM logs")
+  const app = express()
+  app.use(express.json())
+  app.use("/agent", agentRouter)
+  const server = app.listen(0, "127.0.0.1")
+  await new Promise<void>((resolve) => server.once("listening", resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== "string")
+    const enrolled = await fetch(`http://127.0.0.1:${address.port}/agent/enroll`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enrollmentKey: "integration-enroll-key", name: "unregister-fixture", os: "Windows" }),
+    })
+    assert.equal(enrolled.status, 201)
+    const envelope = (await enrolled.json()) as { data: { token: string; client: { id: string } } }
+    const clientId = envelope.data.client.id
+    const command = commands.dispatchCommand({ clientId, type: "run-program", payload: { program: "hostname.exe", args: [] } })
+    db.prepare(`INSERT INTO tasks (id,name,client_ids,created_at,updated_at) VALUES (?,?,?,?,?)`)
+      .run("task-unregister", "unregister task", JSON.stringify([clientId, "other-client"]), Date.now(), Date.now())
+    db.prepare(`INSERT INTO log_packages (id,client_id,command_id,host,ts,storage_name) VALUES (?,?,?,?,?,?)`)
+      .run("p-unregister", clientId, command.id, "fixture-host", Date.now(), "p-unregister.json")
+    db.prepare(`INSERT INTO health_findings (id,package_id,host,title,ts) VALUES (?,?,?,?,?)`)
+      .run("finding-unregister", "p-unregister", "fixture-host", "fixture finding", Date.now())
+    const healthDirectory = path.join(artifactsPath, "health")
+    fs.mkdirSync(healthDirectory, { recursive: true })
+    const healthArtifact = path.join(healthDirectory, "p-unregister.json")
+    fs.writeFileSync(healthArtifact, "fixture")
+    logs.recordLog("info", "client", "fixture client log", `id=${clientId}`)
+    const removed = await fetch(`http://127.0.0.1:${address.port}/agent/client`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${envelope.data.token}` },
+    })
+    assert.equal(removed.status, 200)
+    assert.equal(clients.getClient(clientId), null)
+    assert.equal(commands.listCommands(clientId).length, 0)
+    assert.equal(db.prepare("SELECT 1 FROM log_packages WHERE client_id=?").get(clientId), undefined)
+    assert.equal(db.prepare("SELECT 1 FROM health_findings WHERE package_id='p-unregister'").get(), undefined)
+    assert.deepEqual(JSON.parse((db.prepare("SELECT client_ids FROM tasks WHERE id='task-unregister'").get() as { client_ids: string }).client_ids), ["other-client"])
+    assert.equal(db.prepare("SELECT 1 FROM logs WHERE instr(COALESCE(detail,''),?)>0").get(clientId), undefined)
+    assert.equal(fs.existsSync(healthArtifact), false)
+  } finally {
+    server.close()
+    await new Promise<void>((resolve) => server.once("close", resolve))
+  }
+})
+
+test("ordinary uninstall marks a client unregistered while retaining its card and token", () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients; DELETE FROM logs")
+  const { client, token } = clients.registerClient({ id: "device-ordinary-uninstall", name: "ordinary", os: "Windows" })
+  assert.equal(clients.markClientUnregistered(client.id), true)
+  const retained = clients.getClient(client.id)
+  assert.equal(retained?.status, "unregistered")
+  assert.equal((db.prepare("SELECT token FROM clients WHERE id=?").get(client.id) as { token: string }).token, token)
+})
+
+test("rejected enrollment is recorded without exposing the submitted key", async () => {
+  db.exec("DELETE FROM logs")
+  const app = express()
+  app.use(express.json())
+  app.use("/agent", agentRouter)
+  const server = app.listen(0, "127.0.0.1")
+  await new Promise<void>((resolve) => server.once("listening", resolve))
+
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== "string")
+    const rejectedKey = "fixture-rejected-key-must-not-be-logged"
+    const response = await fetch(`http://127.0.0.1:${address.port}/agent/enroll`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        enrollmentKey: rejectedKey,
+        id: "fixture-client-id",
+        name: "fixture-client",
+        hostname: "fixture-host",
+        os: "Windows",
+      }),
+    })
+    assert.equal(response.status, 401)
+
+    const [entry] = logs.listLogs({ source: "client", limit: 1 })
+    assert.equal(entry.level, "warn")
+    assert.equal(entry.message, "客户端注册被拒绝：入网密钥无效")
+    assert.match(entry.detail ?? "", /ip="127\.0\.0\.1"/)
+    assert.match(entry.detail ?? "", /id="fixture-client-id"/)
+    assert.match(entry.detail ?? "", /hostname="fixture-host"/)
+    assert.doesNotMatch(`${entry.message};${entry.detail}`, new RegExp(rejectedKey))
+  } finally {
+    server.close()
+    await new Promise<void>((resolve) => server.once("close", resolve))
+  }
 })
 
 test("legacy client schema migrates and heartbeat persists osName", () => {
@@ -89,6 +212,18 @@ test("legacy client schema migrates and heartbeat persists osName", () => {
   assert.equal(heartbeat?.version, "1.1.3")
   assert.equal(heartbeat?.osName, "Windows 11 Pro 25H2")
   assert.equal(clients.getClient(client.id)?.osName, "Windows 11 Pro 25H2")
+})
+
+test("heartbeat normalizes resource percentages before persistence", () => {
+  db.exec("DELETE FROM clients")
+  const { client } = clients.registerClient({ name: "metrics-agent", os: "Windows" })
+  const updated = clients.heartbeat(client.id, {
+    cpu: 96.9075958075156,
+    memory: 8.968850698174007,
+    disk: 176.74718097974676,
+    uptime: 12,
+  })
+  assert.deepEqual(updated?.metrics, { cpu: 96.91, memory: 8.97, disk: 100, uptime: 12 })
 })
 
 after(() => {
