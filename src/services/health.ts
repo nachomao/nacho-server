@@ -343,6 +343,7 @@ function analyze(result: CollectLogsResult, packageId: string, host: string, com
 function replacePackageFindings(packageId: string, drafts: FindingDraft[]): void {
   db.exec("BEGIN IMMEDIATE")
   try {
+    db.prepare("DELETE FROM notifications WHERE type='health' AND source_id IN (SELECT id FROM health_findings WHERE package_id=?)").run(packageId)
     db.prepare("DELETE FROM health_findings WHERE package_id = ?").run(packageId)
     for (const draft of drafts) addFinding(draft)
     db.prepare("UPDATE log_packages SET findings = ?, analyzed_at = ? WHERE id = ?").run(drafts.length, Date.now(), packageId)

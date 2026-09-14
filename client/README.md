@@ -5,7 +5,7 @@ Windows 客户端负责设备注册、DPAPI 设备令牌持久化、心跳与指
 ## 运行结构
 
 - 目标：Windows x64，.NET 10，自包含单文件。
-- 服务：`NachoAgent`，`LocalSystem`，自动延迟启动，失败自动重启。
+- 服务：`NachoAgent`，`LocalSystem`，自动启动，失败自动重启；Agent 在网络恢复后持续重连，并独立重试注册、心跳、WebSocket 与轮询。
 - 程序：`%ProgramFiles%\Nacho\Agent\nacho-agent.exe`。
 - 配置：`%ProgramData%\Nacho\agent.json`。
 - 状态：`%ProgramData%\Nacho\state.dat`，使用 DPAPI `LocalMachine` 加密。

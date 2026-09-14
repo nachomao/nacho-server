@@ -1,7 +1,9 @@
 import assert from "node:assert/strict"
+import http from "node:http"
 import fs from "node:fs"
 import path from "node:path"
 import { after, before, test } from "node:test"
+import express from "express"
 
 const databasePath = path.join(process.cwd(), "tmp-install-profiles-test.db")
 let db: typeof import("../db").db
@@ -141,4 +143,28 @@ test("rendered script separates artifact and Agent URLs and escapes profile text
 test("HTTP script loader strips UTF-8 BOM before text rendering", () => {
   assert.equal(stripScriptBom("\uFEFFparam()"), "param()")
   assert.equal(stripScriptBom("param()"), "param()")
+})
+
+test("nacho.ps1 and install.ps1 render the same dynamic install script", async () => {
+  const { artifactRouter } = await import("../routes/artifacts")
+  const app = express()
+  app.use(artifactRouter)
+  const server = await new Promise<http.Server>((resolve) => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance))
+  })
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== "string")
+    const baseUrl = `http://127.0.0.1:${address.port}`
+    const [nacho, legacy] = await Promise.all([
+      fetch(`${baseUrl}/nacho.ps1`),
+      fetch(`${baseUrl}/install.ps1`),
+    ])
+    assert.equal(nacho.status, 200)
+    assert.equal(legacy.status, 200)
+    assert.match(nacho.headers.get("content-type") ?? "", /^text\/plain/)
+    assert.equal(await nacho.text(), await legacy.text())
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+  }
 })

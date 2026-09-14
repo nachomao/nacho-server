@@ -24,7 +24,7 @@ function readScript(name: "nacho.ps1" | "uninstall.ps1"): string | null {
   return stripScriptBom(fs.readFileSync(file, "utf8"))
 }
 
-artifactRouter.get("/nacho.ps1", (req, res) => {
+artifactRouter.get(["/nacho.ps1", "/install.ps1"], (req, res) => {
   const template = readScript("nacho.ps1")
   if (!template) return fail(res, "Windows Agent 安装脚本尚未发布", 503)
   if (req.query.profile !== undefined && typeof req.query.profile !== "string") {

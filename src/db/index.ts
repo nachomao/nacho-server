@@ -182,6 +182,25 @@ export function initSchema() {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS notifications (
+      id          TEXT PRIMARY KEY,
+      type        TEXT NOT NULL,
+      severity    TEXT NOT NULL DEFAULT 'warning',
+      title       TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      detail      TEXT NOT NULL DEFAULT '',
+      code        TEXT,
+      source      TEXT NOT NULL DEFAULT 'server',
+      device_id   TEXT,
+      group_key   TEXT NOT NULL DEFAULT '',
+      ts          INTEGER NOT NULL,
+      read        INTEGER NOT NULL DEFAULT 0,
+      dismissed   INTEGER NOT NULL DEFAULT 0,
+      source_id   TEXT,
+      snoozed_until INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications(ts DESC);
+
     CREATE TABLE IF NOT EXISTS install_profiles (
       id                         TEXT PRIMARY KEY,
       name                       TEXT NOT NULL,
@@ -218,6 +237,15 @@ export function initSchema() {
   // 旧库补列：CREATE TABLE IF NOT EXISTS 不会为已存在的表添加新字段
   ensureColumn("clients", "os_name", "TEXT NOT NULL DEFAULT ''")
   ensureColumn("health_findings", "package_id", "TEXT")
+  ensureColumn("notifications", "dismissed", "INTEGER NOT NULL DEFAULT 0")
+  ensureColumn("notifications", "source_id", "TEXT")
+  ensureColumn("notifications", "severity", "TEXT NOT NULL DEFAULT 'warning'")
+  ensureColumn("notifications", "detail", "TEXT NOT NULL DEFAULT ''")
+  ensureColumn("notifications", "code", "TEXT")
+  ensureColumn("notifications", "source", "TEXT NOT NULL DEFAULT 'server'")
+  ensureColumn("notifications", "device_id", "TEXT")
+  ensureColumn("notifications", "group_key", "TEXT NOT NULL DEFAULT ''")
+  ensureColumn("notifications", "snoozed_until", "INTEGER")
   ensureColumn("log_packages", "client_id", "TEXT")
   ensureColumn("log_packages", "command_id", "TEXT")
   ensureColumn("log_packages", "storage_name", "TEXT")
@@ -232,6 +260,8 @@ export function initSchema() {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_log_packages_command
       ON log_packages(command_id) WHERE command_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_health_findings_package ON health_findings(package_id);
+    CREATE INDEX IF NOT EXISTS idx_notifications_source ON notifications(type, source_id);
+    CREATE INDEX IF NOT EXISTS idx_notifications_group ON notifications(group_key, ts DESC);
   `)
   if (ensureColumn("install_profiles", "active_revision", "INTEGER NOT NULL DEFAULT 1")) {
     db.exec("UPDATE install_profiles SET active_revision = revision")

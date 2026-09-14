@@ -14,6 +14,7 @@ import * as agentUpdates from "../services/agent-updates"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
 import * as managedArtifacts from "../services/managed-artifacts"
 import * as installProfiles from "../services/install-profiles"
+import * as notifications from "../services/notifications"
 import { healthCollectionSchema } from "../schemas/health"
 
 export const panelRouter = Router()
@@ -26,6 +27,109 @@ panelRouter.get(
   "/overview",
   asyncHandler((_req, res) => ok(res, getOverview())),
 )
+
+/* ==================== 通知中心 ==================== */
+const queryBoolean = z.enum(["true", "false"]).transform((value) => value === "true")
+const notificationQuerySchema = z.object({ 
+  limit: z.coerce.number().int().min(1).max(1000).default(100),
+  grouped: queryBoolean.optional().default("false").transform(Boolean),
+  export: queryBoolean.optional().default("false").transform(Boolean),
+  format: z.enum(["json", "csv"]).optional().default("json"),
+  retentionDays: z.coerce.number().int().min(1).max(90).optional().default(30),
+  maxItems: z.coerce.number().int().min(100).max(1000).optional().default(500),
+  autoPurge: queryBoolean.optional().default("true").transform(Boolean),
+})
+const notificationIdSchema = z.string().min(1).max(240)
+
+panelRouter.get(
+  "/notifications",
+  asyncHandler((req, res) => {
+    const parsed = notificationQuerySchema.safeParse(req.query)
+    if (!parsed.success) return fail(res, "通知查询参数无效", 400)
+    
+    const { limit, grouped, export: isExport, format, retentionDays, maxItems, autoPurge } = parsed.data
+    
+    // 导出模式：返回完整列表作为下载文件
+    if (isExport) {
+      const fullLimit = 5000
+      const allNotifications = notifications.listExportNotifications(fullLimit, retentionDays, maxItems, autoPurge)
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -5)
+      
+      if (format === "csv") {
+        const csvLines = ["id,type,severity,title,desc,detail,code,source,deviceId,groupKey,ts,read"]
+        for (const n of allNotifications) {
+          const row = [
+            n.id,
+            n.type, n.severity,
+            `"${n.title.replace(/"/g, '""')}"`,
+            `"${n.desc.replace(/"/g, '""')}"`, `"${n.detail.replace(/"/g, '""')}"`, n.code ?? "", n.source, n.deviceId ?? "", n.groupKey,
+            n.ts.toString(),
+            n.read ? "1" : "0",
+          ]
+          csvLines.push(row.join(","))
+        }
+        res.setHeader("Content-Type", "text/csv; charset=utf-8")
+        res.setHeader("Content-Disposition", `attachment; filename="notifications-${timestamp}.csv"`)
+        return res.send(csvLines.join("\n"))
+      } else {
+        res.setHeader("Content-Type", "application/json; charset=utf-8")
+        res.setHeader("Content-Disposition", `attachment; filename="notifications-${timestamp}.json"`)
+        return res.json(allNotifications)
+      }
+    }
+    
+    // 常规模式：返回分页列表（支持聚合）
+    if (grouped) {
+      return ok(res, notifications.listNotificationsGrouped(limit, retentionDays, maxItems, autoPurge))
+    } else {
+      return ok(res, notifications.listNotifications(limit, retentionDays, maxItems, autoPurge))
+    }
+  }),
+)
+
+panelRouter.post(
+  "/notifications/:id/read",
+  asyncHandler((req, res) => {
+    const parsed = notificationIdSchema.safeParse(req.params.id)
+    if (!parsed.success) return fail(res, "通知 ID 无效", 400)
+    if (!notifications.markRead(parsed.data)) return fail(res, "通知不存在", 404)
+    return ok(res, { id: parsed.data, read: true })
+  }),
+)
+
+panelRouter.post(
+  "/notifications/read-all",
+  asyncHandler((_req, res) => ok(res, { count: notifications.markAllRead() })),
+)
+
+panelRouter.delete(
+  "/notifications",
+  asyncHandler((_req, res) => ok(res, { count: notifications.clear() })),
+)
+
+const snoozeSchema = z.object({ until: z.coerce.number().int().min(0) }).strict()
+panelRouter.post("/notifications/:id/snooze", asyncHandler((req, res) => {
+  const parsed = notificationIdSchema.safeParse(req.params.id)
+  const body = parseBody(snoozeSchema, req.body)
+  if (!parsed.success) return fail(res, "通知 ID 无效", 400)
+  if (!notifications.snooze(parsed.data, body.until)) return fail(res, "通知不存在", 404)
+  return ok(res, { id: parsed.data, snoozedUntil: body.until })
+}))
+panelRouter.post("/notifications/group/:groupKey/snooze", asyncHandler((req, res) => {
+  const body = parseBody(snoozeSchema, req.body)
+  const groupKey = z.string().min(1).max(240).safeParse(req.params.groupKey)
+  if (!groupKey.success) return fail(res, "通知分组无效", 400)
+  return ok(res, { groupKey: groupKey.data, count: notifications.snoozeGroup(groupKey.data, body.until) })
+}))
+panelRouter.post("/notifications/group/:groupKey/read", asyncHandler((req, res) => {
+  const groupKey = z.string().min(1).max(240).safeParse(req.params.groupKey)
+  if (!groupKey.success) return fail(res, "通知分组无效", 400)
+  return ok(res, { groupKey: groupKey.data, count: notifications.markGroupRead(groupKey.data) })
+}))
+panelRouter.post("/notifications/purge", asyncHandler((req, res) => {
+  const body = parseBody(z.object({ retentionDays: z.number().int().min(1).max(90) }).strict(), req.body)
+  return ok(res, { count: notifications.purgeRead(body.retentionDays) })
+}))
 
 /* ==================== 客户端 ==================== */
 panelRouter.get(

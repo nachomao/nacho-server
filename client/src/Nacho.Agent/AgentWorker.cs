@@ -19,7 +19,6 @@ public sealed class AgentWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         CleanupHistoricalBackups();
-        await EnrollWithRetryAsync(stoppingToken);
         await processor.RecoverAsync(stoppingToken);
 
         await Task.WhenAll(
@@ -43,34 +42,16 @@ public sealed class AgentWorker(
         catch (Exception ex) { logger.LogWarning(ex, "Historical update backup cleanup failed"); }
     }
 
-    private async Task EnrollWithRetryAsync(CancellationToken cancellationToken)
-    {
-        var delay = TimeSpan.FromSeconds(1);
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            try
-            {
-                var state = await api.EnsureEnrolledAsync(cancellationToken);
-                logger.LogInformation("Agent enrolled as {ClientId}", state.ClientId);
-                return;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError(ex, "Enrollment failed; retrying in {Delay}", delay);
-                await Task.Delay(delay, cancellationToken);
-                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 60));
-            }
-        }
-    }
-
     private async Task WebSocketLoopAsync(CancellationToken cancellationToken)
     {
         var attempt = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
-            using var socket = api.CreateWebSocket();
+            ClientWebSocket? socket = null;
             try
             {
+                await api.EnsureEnrolledAsync(cancellationToken);
+                socket = api.CreateWebSocket();
                 await socket.ConnectAsync(api.WebSocketUri(), cancellationToken);
                 _webSocketConnected = true;
                 attempt = 0;
@@ -81,7 +62,11 @@ public sealed class AgentWorker(
             {
                 logger.LogWarning(ex, "WebSocket disconnected");
             }
-            finally { _webSocketConnected = false; }
+            finally
+            {
+                _webSocketConnected = false;
+                socket?.Dispose();
+            }
 
             attempt++;
             var cap = Math.Min(Math.Pow(2, Math.Min(attempt, 6)), 60);
@@ -121,6 +106,7 @@ public sealed class AgentWorker(
         {
             try
             {
+                await api.EnsureEnrolledAsync(cancellationToken);
                 await api.HeartbeatAsync(metrics.Read(), cancellationToken);
                 var health = new UpdateHealth(AgentUpdater.CurrentVersion, DateTimeOffset.UtcNow);
                 AgentUpdater.WriteAtomic(paths.UpdateHealthFile, health, AgentJsonContext.Default.UpdateHealth);
@@ -128,8 +114,7 @@ public sealed class AgentWorker(
             catch (HttpRequestException ex) when (ex.Message.Contains("401", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("访问令牌无效", StringComparison.OrdinalIgnoreCase))
             {
                 logger.LogWarning(ex, "Heartbeat rejected; clearing local enrollment state and retrying enrollment");
-                try { api.ResetEnrollment(); await EnrollWithRetryAsync(cancellationToken); }
-                catch (Exception resetEx) when (resetEx is not OperationCanceledException) { logger.LogError(resetEx, "Automatic re-enrollment failed"); }
+                api.ResetEnrollment();
             }
             catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "Heartbeat failed"); }
         } while (await timer.WaitForNextTickAsync(cancellationToken));
@@ -143,6 +128,7 @@ public sealed class AgentWorker(
             if (_webSocketConnected) continue;
             try
             {
+                await api.EnsureEnrolledAsync(cancellationToken);
                 foreach (var command in await api.PullPendingAsync(cancellationToken))
                     await processor.AcceptAsync(command, cancellationToken);
             }
@@ -154,6 +140,9 @@ public sealed class AgentWorker(
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         while (await timer.WaitForNextTickAsync(cancellationToken))
-            await processor.RetryReportsAsync(cancellationToken);
+        {
+            try { await processor.RetryReportsAsync(cancellationToken); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "Command result retry failed"); }
+        }
     }
 }

@@ -254,14 +254,16 @@ try {
   if ($installedHash -ne $manifest.sha256.ToLowerInvariant()) { throw 'Installed Agent checksum verification failed.' }
 
   if ($existingService) {
-    & sc.exe config $ServiceName binPath= "`"$agentPath`"" start= delayed-auto obj= LocalSystem | Out-Null
+    & sc.exe config $ServiceName binPath= "`"$agentPath`"" start= auto obj= LocalSystem | Out-Null
   } else {
-    & sc.exe create $ServiceName binPath= "`"$agentPath`"" start= delayed-auto obj= LocalSystem | Out-Null
+    & sc.exe create $ServiceName binPath= "`"$agentPath`"" start= auto obj= LocalSystem | Out-Null
     $serviceCreated = $LASTEXITCODE -eq 0
   }
   if ($LASTEXITCODE -ne 0) { throw "Failed to create or configure service (sc.exe exit $LASTEXITCODE)." }
   & sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to configure service recovery (sc.exe exit $LASTEXITCODE)." }
+  & sc.exe failureflag $ServiceName 1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Failed to enable service recovery for non-crash failures (sc.exe exit $LASTEXITCODE)." }
   Start-Service -Name $ServiceName
   $runningService = Get-Service -Name $ServiceName -ErrorAction Stop
   $runningStatus = [Enum]::Parse($runningService.Status.GetType(), 'Running')

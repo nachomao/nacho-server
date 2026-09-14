@@ -11,15 +11,21 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
     private readonly AgentOptions _options;
     private readonly StateStore _stateStore;
     private readonly HttpClient _http;
+    private readonly SemaphoreSlim _enrollmentGate = new(1, 1);
 
     public AgentApiClient(IOptions<AgentOptions> options, StateStore stateStore)
+        : this(options, stateStore, new SocketsHttpHandler())
+    {
+    }
+
+    internal AgentApiClient(IOptions<AgentOptions> options, StateStore stateStore, HttpMessageHandler handler)
     {
         _options = options.Value;
         _stateStore = stateStore;
         if (!Uri.TryCreate(_options.ServerUrl, UriKind.Absolute, out var server) ||
             server.Scheme is not ("http" or "https"))
             throw new InvalidDataException("ServerUrl must be an absolute HTTP or HTTPS URL.");
-        _http = new HttpClient { BaseAddress = new Uri(server.ToString().TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(30) };
+        _http = new HttpClient(handler) { BaseAddress = new Uri(server.ToString().TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(30) };
     }
 
     public AgentState? CurrentState => _stateStore.Load();
@@ -31,26 +37,34 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
         var state = _stateStore.Load();
         if (state is not null) return state;
 
-        var body = new
+        await _enrollmentGate.WaitAsync(cancellationToken);
+        try
         {
-            enrollmentKey = _stateStore.ReadEnrollmentKey(),
-            // 卸载/清理后重新安装仍复用服务端客户端 id；服务端对重复 id 做幂等更新。
-            id = DeviceIdentity.GetStableId(),
-            name = string.IsNullOrWhiteSpace(_options.Name) ? Environment.MachineName : _options.Name,
-            hostname = Environment.MachineName,
-            os = "Windows",
-            osName = OsInfo.DisplayName,
-            version = typeof(AgentApiClient).Assembly.GetName().Version?.ToString(3) ?? "1.0.0",
-            tags = _options.Tags,
-            group = _options.Group,
-        };
-        using var response = await _http.PostAsJsonAsync("agent/enroll", body, cancellationToken);
-        var envelope = await ReadEnvelopeAsync<EnrollmentResult>(response, AgentJsonContext.Default.ApiEnvelopeEnrollmentResult, cancellationToken);
-        var enrolled = envelope.Data ?? throw new InvalidDataException("Enrollment response did not include device credentials.");
-        state = new AgentState(enrolled.Client.Id, enrolled.Token);
-        _stateStore.Save(state);
-        _stateStore.DeleteEnrollmentKey();
-        return state;
+            state = _stateStore.Load();
+            if (state is not null) return state;
+
+            var body = new
+            {
+                enrollmentKey = _stateStore.ReadEnrollmentKey(),
+                // 卸载/清理后重新安装仍复用服务端客户端 id；服务端对重复 id 做幂等更新。
+                id = DeviceIdentity.GetStableId(),
+                name = string.IsNullOrWhiteSpace(_options.Name) ? Environment.MachineName : _options.Name,
+                hostname = Environment.MachineName,
+                os = "Windows",
+                osName = OsInfo.DisplayName,
+                version = typeof(AgentApiClient).Assembly.GetName().Version?.ToString(3) ?? "1.0.0",
+                tags = _options.Tags,
+                group = _options.Group,
+            };
+            using var response = await _http.PostAsJsonAsync("agent/enroll", body, cancellationToken);
+            var envelope = await ReadEnvelopeAsync<EnrollmentResult>(response, AgentJsonContext.Default.ApiEnvelopeEnrollmentResult, cancellationToken);
+            var enrolled = envelope.Data ?? throw new InvalidDataException("Enrollment response did not include device credentials.");
+            state = new AgentState(enrolled.Client.Id, enrolled.Token);
+            _stateStore.Save(state);
+            _stateStore.DeleteEnrollmentKey();
+            return state;
+        }
+        finally { _enrollmentGate.Release(); }
     }
 
     public async Task HeartbeatAsync(ClientMetrics metrics, CancellationToken cancellationToken)
@@ -183,5 +197,9 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
         throw new HttpRequestException($"Server returned {(int)response.StatusCode}: {text}", null, response.StatusCode);
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        _enrollmentGate.Dispose();
+    }
 }

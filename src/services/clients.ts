@@ -190,9 +190,18 @@ export function updateClient(id: string, patch: Partial<Pick<Client, "name" | "t
 }
 
 export function deleteClient(id: string): boolean {
-  const info = db.prepare("DELETE FROM clients WHERE id = ?").run(id)
-  db.prepare("DELETE FROM commands WHERE client_id = ?").run(id)
-  return info.changes > 0
+  db.exec("BEGIN IMMEDIATE")
+  try {
+    db.prepare("DELETE FROM notifications WHERE type='offline' AND source_id=?").run(id)
+    db.prepare("DELETE FROM notifications WHERE type='task' AND source_id IN (SELECT id FROM commands WHERE client_id=?)").run(id)
+    db.prepare("DELETE FROM commands WHERE client_id = ?").run(id)
+    const info = db.prepare("DELETE FROM clients WHERE id = ?").run(id)
+    db.exec("COMMIT")
+    return info.changes > 0
+  } catch (error) {
+    db.exec("ROLLBACK")
+    throw error
+  }
 }
 
 /** 彻底注销客户端，并删除所有直接关联的服务端数据。 */
@@ -204,6 +213,9 @@ export function unregisterClient(id: string): boolean {
   const tasks = db.prepare("SELECT id, client_ids FROM tasks").all() as Array<{ id: string; client_ids: string }>
   db.exec("BEGIN IMMEDIATE")
   try {
+    db.prepare("DELETE FROM notifications WHERE type='offline' AND source_id=?").run(id)
+    db.prepare("DELETE FROM notifications WHERE type='task' AND source_id IN (SELECT id FROM commands WHERE client_id=?)").run(id)
+    db.prepare("DELETE FROM notifications WHERE type='health' AND source_id IN (SELECT hf.id FROM health_findings hf JOIN log_packages lp ON lp.id=hf.package_id WHERE lp.client_id=?)").run(id)
     for (const item of tasks) {
       const ids = parseArr(item.client_ids)
       if (ids.includes(id)) db.prepare("UPDATE tasks SET client_ids=?, updated_at=? WHERE id=?").run(JSON.stringify(ids.filter((value) => value !== id)), Date.now(), item.id)

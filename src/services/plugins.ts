@@ -103,7 +103,9 @@ export function updatePlugin(id: string, input: Partial<PluginInput>): Plugin | 
 }
 
 export function deletePlugin(id: string): boolean {
-  return db.prepare("DELETE FROM plugins WHERE id = ?").run(id).changes > 0
+  const changed = db.prepare("DELETE FROM plugins WHERE id = ?").run(id).changes > 0
+  if (changed) db.prepare("DELETE FROM notifications WHERE type='plugin' AND source_id=?").run(id)
+  return changed
 }
 
 export function setStatus(id: string, status: PluginStatus): Plugin | null {
