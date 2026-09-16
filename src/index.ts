@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { config } from "./config"
 import { db, initSchema } from "./db"
 import { HttpError, fail } from "./lib/http"
+import { authorizeLocalControl } from "./lib/local-control"
 import { logger } from "./lib/logger"
 import { agentRouter } from "./routes/agent"
 import { artifactRouter } from "./routes/artifacts"
@@ -28,6 +29,23 @@ app.use(
 // 健康检查（无需鉴权）
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "nacho-server", time: Date.now() })
+})
+
+// 仅供同机面板管理器使用；未配置 token 时不暴露该能力。
+app.post("/_local-control/shutdown", (req, res) => {
+  if (!config.localControlToken) return fail(res, "接口不存在", 404)
+  const providedToken = req.header("x-nacho-local-control")
+  if (
+    !authorizeLocalControl({
+      configuredToken: config.localControlToken,
+      providedToken,
+      remoteAddress: req.socket.remoteAddress,
+    })
+  ) {
+    return fail(res, "本机控制鉴权失败", 403)
+  }
+  res.json({ ok: true, data: { shuttingDown: true } })
+  setImmediate(() => shutdown("LOCAL_CONTROL"))
 })
 
 // Windows Agent 安装器与发布制品无需设备令牌。
@@ -70,7 +88,10 @@ server.listen(config.port, config.host, () => {
 })
 
 // 优雅退出
+let shuttingDown = false
 function shutdown(signal: string) {
+  if (shuttingDown) return
+  shuttingDown = true
   logger.info(`收到 ${signal}，正在关闭服务端...`)
   server.close(() => {
     db.close()
