@@ -63,6 +63,19 @@ npm run build && npm start
 
 ---
 
+## Windows 本机部署（由面板管理）
+
+无需在本目录手动执行安装命令。在 Windows 启动 `nacho-panel` 后，从首次引导或“设置 → 连接”选择“本机部署”，面板的 Node.js Route Handler 会校验本目录，执行 `npm ci` 与构建，生成独立的 `PANEL_API_KEY`、`ENROLLMENT_KEY` 和本机关闭令牌，并通过 `deploy/windows/local-control-server.ps1` 启动受管进程。
+
+- 默认监听 `127.0.0.1:8443`；局域网模式监听 `0.0.0.0`，Agent 安装链接使用检测到的局域网 IPv4 地址。
+- 只有防火墙变更使用 UAC，规则限定为 `Private`、`LocalSubnet` 和所选 TCP 端口。
+- 登录自启使用当前 Windows 用户的 `HKCU` 启动项，不安装系统服务。
+- 修复会保留 SQLite 和密钥并在失败时恢复原构建／配置；彻底卸载删除 `.env`、`data/`、`dist/`、`node_modules/` 与 `.nacho-local/`，保留源码和发布制品。
+
+该管理入口仅接受面板同源 JSON 请求，不应暴露为远程运维 API。
+
+---
+
 ## 一键部署到服务器
 
 支持 Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Fedora。脚本会自动安装 Node、创建系统用户、编译代码、生成随机密钥、安装并启动 systemd 服务、放行防火墙端口。
@@ -113,9 +126,11 @@ sudo PURGE=1 ./deploy/uninstall.sh   # 卸载并删除数据与用户
 | `PUBLIC_BASE_URL` | 安装脚本写入的外部服务端地址，留空时使用请求地址 | 空 |
 | `TRUST_PROXY` | 是否信任反向代理头以计算外部安装地址 | `false` |
 | `ARTIFACTS_PATH` | Agent 发布制品目录 | `./artifacts` |
-| `OFFLINE_THRESHOLD` | 超过该秒数无心跳判定为离线 | `90` |
-| `DATABASE_PATH` | SQLite 文件路径 | `./data/control.db` |
+| `HEALTH_ARTIFACTS_PATH` | 健康快照目录；留空时按制品或数据库目录推导 | 空 |
+| `OFFLINE_THRESHOLD` | 超过该秒数无心跳判定为离线 | `60` |
+| `DATABASE_PATH` | SQLite 文件路径 | `./data/nacho.db` |
 | `CORS_ORIGIN` | 允许的面板来源，`*` 或逗号分隔 | `*` |
+| `LOCAL_CONTROL_TOKEN` | 可选的 loopback 优雅关闭令牌；本机管理器自动生成 | 空 |
 
 ---
 
@@ -272,7 +287,7 @@ curl -s -X POST $BASE/agent/commands/<cmdId>/report \
 - 增量初始化创建 `managed_artifacts`、`deployment_batches`、`deployment_items`，可在旧库及重复启动上执行。
 - 安装结果和服务日志分离：完整结构化结果只在命令记录中，服务日志仅保存 resultBytes 与 exitCode，不复制参数、包正文或结果正文。
 
-## Windows 文件下发与回滚
+## Windows 文件下发与回��
 
 - `POST /api/panel/file-deployments` 接收一个 ready file artifact、无重复的在线 Windows `clientIds`、绝对 `destinationPath`、`fail|replace` 冲突策略和 `createDirectories`，为每台目标创建独立 `deploy-file` 命令并写入复用的 deployment batch/item。
 - `deploy-file` payload 严格包含 `artifactId`、`fileName`、`sha256`、`sizeBytes`、`destinationPath`、`conflictPolicy` 和 `createDirectories`；文件上限为 512 MiB。通用命令接口拒绝绕过专用部署入口。

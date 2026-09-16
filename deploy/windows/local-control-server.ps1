@@ -74,6 +74,10 @@ function Remove-ManagedFirewallRules {
         Remove-NetFirewallRule -ErrorAction Stop
 }
 
+function Get-AutostartCommand {
+    return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Action Start -Port {1}' -f $PSCommandPath, $Port
+}
+
 Assert-TrustedProject
 
 switch ($Action) {
@@ -82,7 +86,7 @@ switch ($Action) {
         $Managed = Get-ManagedProcess
         $AutoStart = $false
         try {
-            $AutoStart = $null -ne (Get-ItemProperty -LiteralPath $RunKey -Name $RunValueName -ErrorAction Stop).$RunValueName
+            $AutoStart = (Get-ItemProperty -LiteralPath $RunKey -Name $RunValueName -ErrorAction Stop).$RunValueName -eq (Get-AutostartCommand)
         } catch {}
         $FirewallPorts = @()
         try {
@@ -94,15 +98,23 @@ switch ($Action) {
             }
         } catch {}
         $StartedAt = $null
-        if ($null -ne $Managed) {
-            try { $StartedAt = ([Management.ManagementDateTimeConverter]::ToDateTime($Managed.CreationDate)).ToUniversalTime().ToString("o") } catch {}
+        $ListeningPorts = @()
+        if ($Managed) {
+            $StartedAt = $Managed.CreationDate.ToUniversalTime().ToString("o")
+            $ListeningPorts = @(
+                Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                    Where-Object { $_.OwningProcess -eq $Managed.ProcessId } |
+                    Select-Object -ExpandProperty LocalPort -Unique
+            )
         }
+
         [ordered]@{
-            running = $null -ne $Managed
-            pid = if ($null -ne $Managed) { [int]$Managed.ProcessId } else { $null }
+            running = [bool]$Managed
+            pid = if ($Managed) { [int]$Managed.ProcessId } else { $null }
             startedAt = $StartedAt
             autoStartEnabled = $AutoStart
-            firewallPorts = @($FirewallPorts | Sort-Object -Unique)
+            firewallPorts = @($FirewallPorts)
+            listeningPorts = @($ListeningPorts)
         } | ConvertTo-Json -Compress
     }
     "Start" {
@@ -110,8 +122,11 @@ switch ($Action) {
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
         Remove-StalePid
         if ($null -ne (Get-ManagedProcess)) { exit 0 }
+        $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($PortOwner) { throw "端口 $Port 已被进程 $($PortOwner.OwningProcess) 占用" }
         $Node = Get-Command "node.exe" -ErrorAction Stop
-        $Child = Start-Process -FilePath $Node.Source -ArgumentList @($EntryPath) -WorkingDirectory $ServerDir -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
+        $QuotedEntryPath = '"' + $EntryPath.Replace('"', '\"') + '"'
+        $Child = Start-Process -FilePath $Node.Source -ArgumentList @($QuotedEntryPath) -WorkingDirectory $ServerDir -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
         Set-Content -LiteralPath $PidPath -Value ([string]$Child.Id) -Encoding ASCII -NoNewline
     }
     "ForceStop" {
@@ -121,8 +136,7 @@ switch ($Action) {
     }
     "EnableAutostart" {
         New-Item -Path $RunKey -Force | Out-Null
-        $Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Action Start' -f $PSCommandPath
-        Set-ItemProperty -LiteralPath $RunKey -Name $RunValueName -Value $Command -Type String
+        Set-ItemProperty -LiteralPath $RunKey -Name $RunValueName -Value (Get-AutostartCommand) -Type String
     }
     "DisableAutostart" {
         Remove-ItemProperty -LiteralPath $RunKey -Name $RunValueName -Force -ErrorAction SilentlyContinue
