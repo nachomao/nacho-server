@@ -5,7 +5,9 @@ param(
     [string]$Action,
 
     [ValidateRange(1024, 65535)]
-    [int]$Port = 8443
+    [int]$Port = 8443,
+
+    [string]$PanelNodePath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,19 +85,34 @@ function Update-ProcessPath {
 }
 
 function Get-NodeArchiveArchitecture {
-    $Architecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
-        $env:PROCESSOR_ARCHITEW6432
+    $ArchitectureCandidates = @()
+
+    try {
+        $ArchitectureCandidates += [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     }
-    else {
-        $env:PROCESSOR_ARCHITECTURE
+    catch {}
+
+    if (-not [string]::IsNullOrWhiteSpace($PanelNodePath) -and (Test-Path -LiteralPath $PanelNodePath -PathType Leaf)) {
+        try {
+            $ArchitectureCandidates += (& $PanelNodePath -p "process.arch" 2>$null | Select-Object -First 1)
+        }
+        catch {}
     }
 
-    switch -Regex ($Architecture) {
-        '^ARM64$' { return "arm64" }
-        '^(AMD64|IA64)$' { return "x64" }
-        '^x86$' { return "x86" }
-        default { return $null }
+    $ArchitectureCandidates += @(
+        $env:PROCESSOR_ARCHITEW6432,
+        $env:PROCESSOR_ARCHITECTURE
+    )
+
+    foreach ($Architecture in $ArchitectureCandidates) {
+        switch -Regex ([string]$Architecture) {
+            '^(?i:ARM64)$' { return "arm64" }
+            '^(?i:AMD64|IA64|X64)$' { return "x64" }
+            '^(?i:x86|ia32)$' { return "x86" }
+        }
     }
+
+    return $null
 }
 
 function Get-NodeRuntimeDetails {
@@ -120,12 +137,31 @@ function Get-NodeRuntimeDetails {
         }
     }
 
-    $NpmReady = -not [string]::IsNullOrWhiteSpace($NpmPath) -and (Test-Path -LiteralPath $NpmPath -PathType Leaf)
+    $NpmVersion = $null
+    $NpmReady = $false
+    if (-not [string]::IsNullOrWhiteSpace($NpmPath) -and (Test-Path -LiteralPath $NpmPath -PathType Leaf)) {
+        $PreviousPath = $env:Path
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($NodePath)) {
+                $env:Path = "$(Split-Path -Parent $NodePath);$env:Path"
+            }
+            $NpmVersion = (& $NpmPath --version 2>$null | Select-Object -First 1).Trim()
+            $NpmReady = $LASTEXITCODE -eq 0 -and $NpmVersion -match '^\d+\.'
+        }
+        catch {
+            $NpmVersion = $null
+        }
+        finally {
+            $env:Path = $PreviousPath
+        }
+    }
+
     return [pscustomobject]@{
         nodePath = if ($NodeReady) { $NodePath } else { $null }
         npmPath = if ($NpmReady) { $NpmPath } else { $null }
         nodeVersion = $NodeVersion
         nodeReady = $NodeReady
+        npmVersion = $NpmVersion
         npmAvailable = $NpmReady
         ready = ($NodeReady -and $NpmReady)
         managed = $Managed
@@ -142,24 +178,66 @@ function Get-NodeRuntimeInfo {
         $Candidates += Get-NodeRuntimeDetails -NodePath $ManagedNodePath -NpmPath $ManagedNpmPath -Managed $true
     }
 
-    $NodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
-    $NpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if ($NodeCommand -or $NpmCommand) {
-        $Candidates += Get-NodeRuntimeDetails `
-            -NodePath $(if ($NodeCommand) { $NodeCommand.Source } else { $null }) `
-            -NpmPath $(if ($NpmCommand) { $NpmCommand.Source } else { $null }) `
-            -Managed $false
+    $NodePaths = @($PanelNodePath)
+    $NodeCommand = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($NodeCommand) { $NodePaths += $NodeCommand.Source }
+    foreach ($Directory in @($env:NVM_SYMLINK, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ([string]::IsNullOrWhiteSpace($Directory)) { continue }
+        if ($Directory -eq $env:NVM_SYMLINK) {
+            $NodePaths += Join-Path $Directory "node.exe"
+        }
+        else {
+            $NodePaths += Join-Path $Directory "nodejs\node.exe"
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $NodePaths += Join-Path $env:LOCALAPPDATA "Programs\nodejs\node.exe"
+    }
+    $NodePaths = @($NodePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique)
+
+    $NpmPaths = @()
+    foreach ($NodePath in $NodePaths) {
+        $NpmPaths += Join-Path (Split-Path -Parent $NodePath) "npm.cmd"
+    }
+    foreach ($CommandName in @("npm.cmd", "npm.exe", "npm")) {
+        $NpmCommand = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($NpmCommand -and -not [string]::IsNullOrWhiteSpace($NpmCommand.Source)) {
+            $NpmPaths += $NpmCommand.Source
+        }
+    }
+    $WhereCommand = Get-Command where.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($WhereCommand) {
+        $NpmPaths += @(& $WhereCommand.Source npm.cmd 2>$null)
+        $NpmPaths += @(& $WhereCommand.Source npm 2>$null)
+    }
+    $NpmPaths = @($NpmPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique)
+
+    foreach ($NodePath in $NodePaths) {
+        $SiblingNpmPath = Join-Path (Split-Path -Parent $NodePath) "npm.cmd"
+        $OrderedNpmPaths = @($SiblingNpmPath) + @($NpmPaths | Where-Object { $_ -ne $SiblingNpmPath })
+        $AddedCandidate = $false
+        foreach ($NpmPath in ($OrderedNpmPaths | Select-Object -Unique)) {
+            if (-not (Test-Path -LiteralPath $NpmPath -PathType Leaf)) { continue }
+            $Candidates += Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $NpmPath -Managed $false
+            $AddedCandidate = $true
+        }
+        if (-not $AddedCandidate) {
+            $Candidates += Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $null -Managed $false
+        }
     }
 
     $Selected = $Candidates | Where-Object { $_.ready } | Select-Object -First 1
     if (-not $Selected) {
+        $Selected = $Candidates | Where-Object { $_.nodeReady } | Select-Object -First 1
+    }
+    if (-not $Selected) {
         $Selected = $Candidates | Select-Object -First 1
     }
-    if ($Selected -and $Selected.managed) {
-        $env:Path = "$ManagedNodeDir;$env:Path"
+    if ($Selected -and $Selected.nodePath) {
+        $env:Path = "$(Split-Path -Parent $Selected.nodePath);$env:Path"
     }
 
-    $WingetCommand = Get-Command winget.exe -ErrorAction SilentlyContinue
+    $WingetCommand = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     return [pscustomobject]@{
         nodePath = if ($Selected) { $Selected.nodePath } else { $null }
         npmPath = if ($Selected) { $Selected.npmPath } else { $null }
