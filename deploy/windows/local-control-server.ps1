@@ -15,6 +15,8 @@ $StateDir = Join-Path $ServerDir ".nacho-local"
 $PidPath = Join-Path $StateDir "server.pid"
 $StdoutPath = Join-Path $StateDir "server.stdout.log"
 $StderrPath = Join-Path $StateDir "server.stderr.log"
+$RuntimeRoot = Join-Path $ServerDir ".nacho-runtime"
+$ManagedNodeDir = Join-Path $RuntimeRoot "node"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $RunValueName = "NachoControlServer"
 $FirewallPrefix = "NachoPanel-Local-Control-"
@@ -77,38 +79,190 @@ function Remove-ManagedFirewallRules {
 function Update-ProcessPath {
     $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = (@($MachinePath, $UserPath, $env:Path) | Where-Object { $_ }) -join ";"
+    $env:Path = (@($MachinePath, $UserPath, $env:Path) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
+}
+
+function Get-NodeArchiveArchitecture {
+    $Architecture = if (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
+        $env:PROCESSOR_ARCHITEW6432
+    }
+    else {
+        $env:PROCESSOR_ARCHITECTURE
+    }
+
+    switch -Regex ($Architecture) {
+        '^ARM64$' { return "arm64" }
+        '^(AMD64|IA64)$' { return "x64" }
+        '^x86$' { return "x86" }
+        default { return $null }
+    }
+}
+
+function Get-NodeRuntimeDetails {
+    param(
+        [AllowNull()][string]$NodePath,
+        [AllowNull()][string]$NpmPath,
+        [bool]$Managed
+    )
+
+    $NodeVersion = $null
+    $NodeReady = $false
+
+    if (-not [string]::IsNullOrWhiteSpace($NodePath) -and (Test-Path -LiteralPath $NodePath -PathType Leaf)) {
+        try {
+            $NodeVersion = (& $NodePath --version 2>$null | Select-Object -First 1).Trim()
+            if ($NodeVersion -match '^v(?<major>\d+)\.') {
+                $NodeReady = [int]$Matches.major -ge 22
+            }
+        }
+        catch {
+            $NodeVersion = $null
+        }
+    }
+
+    $NpmReady = -not [string]::IsNullOrWhiteSpace($NpmPath) -and (Test-Path -LiteralPath $NpmPath -PathType Leaf)
+    return [pscustomobject]@{
+        nodePath = if ($NodeReady) { $NodePath } else { $null }
+        npmPath = if ($NpmReady) { $NpmPath } else { $null }
+        nodeVersion = $NodeVersion
+        nodeReady = $NodeReady
+        npmAvailable = $NpmReady
+        ready = ($NodeReady -and $NpmReady)
+        managed = $Managed
+    }
 }
 
 function Get-NodeRuntimeInfo {
     Update-ProcessPath
-    $Node = Get-Command "node.exe" -ErrorAction SilentlyContinue
-    $Npm = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
-    $NodeVersion = $null
-    $NodeMajor = 0
-    if ($Node) {
-        try {
-            $NodeVersion = ([string](& $Node.Source --version)).Trim().TrimStart("v")
-            if ($NodeVersion -match "^(\d+)\.") { $NodeMajor = [int]$Matches[1] }
-        } catch {}
-    }
-    $NpmAvailable = $false
-    if ($Npm) {
-        try {
-            & $Npm.Source --version *> $null
-            $NpmAvailable = $LASTEXITCODE -eq 0
-        } catch {}
-    }
-    $Winget = Get-Command "winget.exe" -ErrorAction SilentlyContinue
 
+    $Candidates = @()
+    $ManagedNodePath = Join-Path $ManagedNodeDir "node.exe"
+    $ManagedNpmPath = Join-Path $ManagedNodeDir "npm.cmd"
+    if ((Test-Path -LiteralPath $ManagedNodePath -PathType Leaf) -or (Test-Path -LiteralPath $ManagedNpmPath -PathType Leaf)) {
+        $Candidates += Get-NodeRuntimeDetails -NodePath $ManagedNodePath -NpmPath $ManagedNpmPath -Managed $true
+    }
+
+    $NodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+    $NpmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if ($NodeCommand -or $NpmCommand) {
+        $Candidates += Get-NodeRuntimeDetails `
+            -NodePath $(if ($NodeCommand) { $NodeCommand.Source } else { $null }) `
+            -NpmPath $(if ($NpmCommand) { $NpmCommand.Source } else { $null }) `
+            -Managed $false
+    }
+
+    $Selected = $Candidates | Where-Object { $_.ready } | Select-Object -First 1
+    if (-not $Selected) {
+        $Selected = $Candidates | Select-Object -First 1
+    }
+    if ($Selected -and $Selected.managed) {
+        $env:Path = "$ManagedNodeDir;$env:Path"
+    }
+
+    $WingetCommand = Get-Command winget.exe -ErrorAction SilentlyContinue
     return [pscustomobject]@{
-        nodeReady = [bool]($Node -and $NodeMajor -ge 22)
-        nodeVersion = if ($NodeVersion) { $NodeVersion } else { "未检测到" }
-        nodePath = if ($Node) { $Node.Source } else { $null }
-        npmAvailable = $NpmAvailable
-        npmPath = if ($Npm) { $Npm.Source } else { $null }
-        runtimeInstallerAvailable = [bool]$Winget
-        wingetPath = if ($Winget) { $Winget.Source } else { $null }
+        nodePath = if ($Selected) { $Selected.nodePath } else { $null }
+        npmPath = if ($Selected) { $Selected.npmPath } else { $null }
+        nodeVersion = if ($Selected) { $Selected.nodeVersion } else { $null }
+        nodeReady = if ($Selected) { $Selected.nodeReady } else { $false }
+        npmAvailable = if ($Selected) { $Selected.npmAvailable } else { $false }
+        ready = if ($Selected) { $Selected.ready } else { $false }
+        managed = if ($Selected) { $Selected.managed } else { $false }
+        runtimeInstallerAvailable = [bool](Get-NodeArchiveArchitecture) -or [bool]$WingetCommand
+        wingetPath = if ($WingetCommand) { $WingetCommand.Source } else { $null }
+    }
+}
+
+function Install-PortableNodeRuntime {
+    $Architecture = Get-NodeArchiveArchitecture
+    if ([string]::IsNullOrWhiteSpace($Architecture)) {
+        throw "当前 Windows 处理器架构不受 Node.js 官方便携包支持。"
+    }
+
+    New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
+
+    $Index = @(Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -Method Get -TimeoutSec 60 -ErrorAction Stop)
+    $Release = $Index |
+        Where-Object {
+            $_.lts -and
+            ([int]((([string]$_.version).TrimStart("v").Split('.'))[0]) -ge 22) -and
+            ($_.files -contains "win-$Architecture-zip")
+        } |
+        Sort-Object -Property @{ Expression = { [version](([string]$_.version).TrimStart("v")) } } -Descending |
+        Select-Object -First 1
+
+    if (-not $Release) {
+        throw "未找到适用于 win-$Architecture 的 Node.js 22+ LTS 官方便携包。"
+    }
+
+    $Version = [string]$Release.version
+    $ArchiveName = "node-$Version-win-$Architecture.zip"
+    $DownloadRoot = "https://nodejs.org/dist/$Version"
+    $ArchivePath = Join-Path $StateDir $ArchiveName
+    $ChecksumsPath = Join-Path $StateDir "$Version-SHASUMS256.txt"
+    $ExtractPath = Join-Path $RuntimeRoot "extract-$Version"
+    $BackupPath = Join-Path $RuntimeRoot "node-backup"
+
+    try {
+        Invoke-WebRequest -Uri "$DownloadRoot/$ArchiveName" -OutFile $ArchivePath -UseBasicParsing -TimeoutSec 900 -ErrorAction Stop
+        Invoke-WebRequest -Uri "$DownloadRoot/SHASUMS256.txt" -OutFile $ChecksumsPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+
+        $ChecksumLine = Get-Content -LiteralPath $ChecksumsPath |
+            Where-Object { $_ -match "^(?<hash>[a-fA-F0-9]{64})\s+$([regex]::Escape($ArchiveName))$" } |
+            Select-Object -First 1
+        if (-not $ChecksumLine -or $ChecksumLine -notmatch "^(?<hash>[a-fA-F0-9]{64})") {
+            throw "Node.js 官方校验文件中缺少 $ArchiveName。"
+        }
+
+        $ExpectedHash = $Matches.hash.ToUpperInvariant()
+        $ActualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToUpperInvariant()
+        if ($ActualHash -ne $ExpectedHash) {
+            throw "Node.js 便携包 SHA-256 校验失败。"
+        }
+
+        Remove-Item -LiteralPath $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+        Expand-Archive -LiteralPath $ArchivePath -DestinationPath $ExtractPath -Force
+        $ExtractedNodeDir = Join-Path $ExtractPath "node-$Version-win-$Architecture"
+        if (-not (Test-Path -LiteralPath (Join-Path $ExtractedNodeDir "node.exe") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $ExtractedNodeDir "npm.cmd") -PathType Leaf)) {
+            throw "Node.js 官方便携包内容不完整。"
+        }
+
+        Remove-Item -LiteralPath $BackupPath -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $ManagedNodeDir) {
+            Move-Item -LiteralPath $ManagedNodeDir -Destination $BackupPath -Force
+        }
+
+        try {
+            Move-Item -LiteralPath $ExtractedNodeDir -Destination $ManagedNodeDir -Force
+        }
+        catch {
+            if (Test-Path -LiteralPath $BackupPath) {
+                Move-Item -LiteralPath $BackupPath -Destination $ManagedNodeDir -Force
+            }
+            throw
+        }
+
+        Remove-Item -LiteralPath $BackupPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    finally {
+        Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $ChecksumsPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-NodeRuntimeWithWinget {
+    param([string]$WingetPath)
+
+    if ([string]::IsNullOrWhiteSpace($WingetPath)) {
+        throw "Windows Package Manager 不可用，无法执行备用安装。"
+    }
+
+    & $WingetPath install --id OpenJS.NodeJS.LTS --exact --source winget --accept-package-agreements --accept-source-agreements --silent --disable-interactivity
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows Package Manager 安装 Node.js LTS 失败，退出代码：$LASTEXITCODE。"
     }
 }
 
@@ -162,20 +316,41 @@ switch ($Action) {
     }
     "InstallRuntime" {
         $Runtime = Get-NodeRuntimeInfo
-        if ($Runtime.nodeReady -and $Runtime.npmAvailable) { exit 0 }
-        if (-not $Runtime.runtimeInstallerAvailable) { throw "未找到 Windows Package Manager（winget）" }
+        if ($Runtime.ready) {
+            @{ ok = $true; runtime = $Runtime } | ConvertTo-Json -Compress
+            break
+        }
 
-        $WingetOutput = & $Runtime.wingetPath install --id OpenJS.NodeJS.LTS --exact --source winget --silent --force --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            $Detail = $WingetOutput.Trim()
-            if (-not $Detail) { $Detail = "退出码 $LASTEXITCODE" }
-            throw "Node.js LTS 自动安装失败：$Detail"
+        $PortableError = $null
+        try {
+            Install-PortableNodeRuntime
+        }
+        catch {
+            $PortableError = $_.Exception.Message
+            if (-not [string]::IsNullOrWhiteSpace($Runtime.wingetPath)) {
+                try {
+                    Install-NodeRuntimeWithWinget -WingetPath $Runtime.wingetPath
+                    Update-ProcessPath
+                }
+                catch {
+                    throw "Node.js LTS 便携运行环境安装失败（$PortableError）；备用系统安装也失败：$($_.Exception.Message)"
+                }
+            }
+            else {
+                throw "Node.js LTS 便携运行环境安装失败：$PortableError"
+            }
         }
 
         $InstalledRuntime = Get-NodeRuntimeInfo
-        if (-not $InstalledRuntime.nodeReady -or -not $InstalledRuntime.npmAvailable) {
-            throw "安装完成后仍未检测到 Node.js 22+ 与 npm"
+        if (-not $InstalledRuntime.ready) {
+            if ($PortableError) {
+                throw "便携运行环境安装失败（$PortableError），备用系统安装完成后仍未检测到 Node.js 22+ 与 npm。请重新打开面板后重试。"
+            }
+            throw "Node.js LTS 便携运行环境安装完成，但未检测到 Node.js 22+ 与 npm。"
         }
+
+        @{ ok = $true; runtime = $InstalledRuntime } | ConvertTo-Json -Compress
+        break
     }
     "Build" {
         $Runtime = Get-NodeRuntimeInfo
