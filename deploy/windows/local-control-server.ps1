@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Status", "Start", "ForceStop", "EnableAutostart", "DisableAutostart", "SetFirewall", "ApplyFirewall", "RemoveFirewall", "RemoveFirewallElevated")]
+    [ValidateSet("Status", "InstallRuntime", "Build", "Start", "ForceStop", "EnableAutostart", "DisableAutostart", "SetFirewall", "ApplyFirewall", "RemoveFirewall", "RemoveFirewallElevated")]
     [string]$Action,
 
     [ValidateRange(1024, 65535)]
@@ -74,6 +74,44 @@ function Remove-ManagedFirewallRules {
         Remove-NetFirewallRule -ErrorAction Stop
 }
 
+function Update-ProcessPath {
+    $MachinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = (@($MachinePath, $UserPath, $env:Path) | Where-Object { $_ }) -join ";"
+}
+
+function Get-NodeRuntimeInfo {
+    Update-ProcessPath
+    $Node = Get-Command "node.exe" -ErrorAction SilentlyContinue
+    $Npm = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
+    $NodeVersion = $null
+    $NodeMajor = 0
+    if ($Node) {
+        try {
+            $NodeVersion = ([string](& $Node.Source --version)).Trim().TrimStart("v")
+            if ($NodeVersion -match "^(\d+)\.") { $NodeMajor = [int]$Matches[1] }
+        } catch {}
+    }
+    $NpmAvailable = $false
+    if ($Npm) {
+        try {
+            & $Npm.Source --version *> $null
+            $NpmAvailable = $LASTEXITCODE -eq 0
+        } catch {}
+    }
+    $Winget = Get-Command "winget.exe" -ErrorAction SilentlyContinue
+
+    return [pscustomobject]@{
+        nodeReady = [bool]($Node -and $NodeMajor -ge 22)
+        nodeVersion = if ($NodeVersion) { $NodeVersion } else { "未检测到" }
+        nodePath = if ($Node) { $Node.Source } else { $null }
+        npmAvailable = $NpmAvailable
+        npmPath = if ($Npm) { $Npm.Source } else { $null }
+        runtimeInstallerAvailable = [bool]$Winget
+        wingetPath = if ($Winget) { $Winget.Source } else { $null }
+    }
+}
+
 function Get-AutostartCommand {
     return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Action Start -Port {1}' -f $PSCommandPath, $Port
 }
@@ -83,6 +121,7 @@ Assert-TrustedProject
 switch ($Action) {
     "Status" {
         Remove-StalePid
+        $Runtime = Get-NodeRuntimeInfo
         $Managed = Get-ManagedProcess
         $AutoStart = $false
         try {
@@ -115,7 +154,41 @@ switch ($Action) {
             autoStartEnabled = $AutoStart
             firewallPorts = @($FirewallPorts)
             listeningPorts = @($ListeningPorts)
+            nodeReady = $Runtime.nodeReady
+            nodeVersion = $Runtime.nodeVersion
+            npmAvailable = $Runtime.npmAvailable
+            runtimeInstallerAvailable = $Runtime.runtimeInstallerAvailable
         } | ConvertTo-Json -Compress
+    }
+    "InstallRuntime" {
+        $Runtime = Get-NodeRuntimeInfo
+        if ($Runtime.nodeReady -and $Runtime.npmAvailable) { exit 0 }
+        if (-not $Runtime.runtimeInstallerAvailable) { throw "未找到 Windows Package Manager（winget）" }
+
+        $WingetOutput = & $Runtime.wingetPath install --id OpenJS.NodeJS.LTS --exact --source winget --silent --force --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            $Detail = $WingetOutput.Trim()
+            if (-not $Detail) { $Detail = "退出码 $LASTEXITCODE" }
+            throw "Node.js LTS 自动安装失败：$Detail"
+        }
+
+        $InstalledRuntime = Get-NodeRuntimeInfo
+        if (-not $InstalledRuntime.nodeReady -or -not $InstalledRuntime.npmAvailable) {
+            throw "安装完成后仍未检测到 Node.js 22+ 与 npm"
+        }
+    }
+    "Build" {
+        $Runtime = Get-NodeRuntimeInfo
+        if (-not $Runtime.nodeReady -or -not $Runtime.npmAvailable) { throw "缺少 Node.js 22+ 或 npm" }
+        Push-Location $ServerDir
+        try {
+            & $Runtime.npmPath ci --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "npm ci 失败（退出码 $LASTEXITCODE）" }
+            & $Runtime.npmPath run build
+            if ($LASTEXITCODE -ne 0) { throw "npm run build 失败（退出码 $LASTEXITCODE）" }
+        } finally {
+            Pop-Location
+        }
     }
     "Start" {
         if (-not (Test-Path -LiteralPath $EntryPath)) { throw "缺少 dist/index.js，请先构建服务端" }
@@ -124,9 +197,10 @@ switch ($Action) {
         if ($null -ne (Get-ManagedProcess)) { exit 0 }
         $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($PortOwner) { throw "端口 $Port 已被进程 $($PortOwner.OwningProcess) 占用" }
-        $Node = Get-Command "node.exe" -ErrorAction Stop
+        $Runtime = Get-NodeRuntimeInfo
+        if (-not $Runtime.nodeReady) { throw "缺少 Node.js 22 或更高版本" }
         $QuotedEntryPath = '"' + $EntryPath.Replace('"', '\"') + '"'
-        $Child = Start-Process -FilePath $Node.Source -ArgumentList @($QuotedEntryPath) -WorkingDirectory $ServerDir -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
+        $Child = Start-Process -FilePath $Runtime.nodePath -ArgumentList @($QuotedEntryPath) -WorkingDirectory $ServerDir -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
         Set-Content -LiteralPath $PidPath -Value ([string]$Child.Id) -Encoding ASCII -NoNewline
     }
     "ForceStop" {
