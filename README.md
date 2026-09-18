@@ -287,7 +287,7 @@ curl -s -X POST $BASE/agent/commands/<cmdId>/report \
 - 增量初始化创建 `managed_artifacts`、`deployment_batches`、`deployment_items`，可在旧库及重复启动上执行。
 - 安装结果和服务日志分离：完整结构化结果只在命令记录中，服务日志仅保存 resultBytes 与 exitCode，不复制参数、包正文或结果正文。
 
-## Windows 文件下发与回��
+## Windows 文件下发与回滚
 
 - `POST /api/panel/file-deployments` 接收一个 ready file artifact、无重复的在线 Windows `clientIds`、绝对 `destinationPath`、`fail|replace` 冲突策略和 `createDirectories`，为每台目标创建独立 `deploy-file` 命令并写入复用的 deployment batch/item。
 - `deploy-file` payload 严格包含 `artifactId`、`fileName`、`sha256`、`sizeBytes`、`destinationPath`、`conflictPolicy` 和 `createDirectories`；文件上限为 512 MiB。通用命令接口拒绝绕过专用部署入口。
