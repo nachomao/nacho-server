@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("Status", "InstallRuntime", "Build", "Start", "ForceStop", "EnableAutostart", "DisableAutostart", "SetFirewall", "ApplyFirewall", "RemoveFirewall", "RemoveFirewallElevated")]
@@ -11,8 +11,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 $ServerDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $EntryPath = [System.IO.Path]::GetFullPath((Join-Path $ServerDir "dist\index.js"))
+$EnvironmentPath = Join-Path $ServerDir ".env"
 $StateDir = Join-Path $ServerDir ".nacho-local"
 $PidPath = Join-Path $StateDir "server.pid"
 $StdoutPath = Join-Path $StateDir "server.stdout.log"
@@ -26,8 +29,17 @@ $FirewallPrefix = "NachoPanel-Local-Control-"
 function Assert-TrustedProject {
     $ManifestPath = Join-Path $ServerDir "package.json"
     if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "缺少 server/package.json" }
-    $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    $Manifest = [System.IO.File]::ReadAllText($ManifestPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     if ($Manifest.name -ne "nacho-server") { throw "目标目录不是 Nacho 服务端项目" }
+}
+
+function Import-ManagedEnvironment {
+    if (-not (Test-Path -LiteralPath $EnvironmentPath -PathType Leaf)) { throw "缺少 server/.env" }
+    foreach ($Line in [System.IO.File]::ReadAllLines($EnvironmentPath, [System.Text.Encoding]::UTF8)) {
+        if ($Line -match '^(?<key>[A-Za-z_][A-Za-z0-9_]*)=(?<value>.*)$') {
+            [Environment]::SetEnvironmentVariable($Matches.key, $Matches.value, "Process")
+        }
+    }
 }
 
 function Get-ManagedProcess {
@@ -139,26 +151,44 @@ function Get-NodeRuntimeDetails {
 
     $NpmVersion = $null
     $NpmReady = $false
+    $NpmCliPath = $null
     if (-not [string]::IsNullOrWhiteSpace($NpmPath) -and (Test-Path -LiteralPath $NpmPath -PathType Leaf)) {
         $PreviousPath = $env:Path
+        $PreviousErrorActionPreference = $ErrorActionPreference
         try {
             if (-not [string]::IsNullOrWhiteSpace($NodePath)) {
                 $env:Path = "$(Split-Path -Parent $NodePath);$env:Path"
             }
-            $NpmVersion = (& $NpmPath --version 2>$null | Select-Object -First 1).Trim()
-            $NpmReady = $LASTEXITCODE -eq 0 -and $NpmVersion -match '^\d+\.'
+            $ErrorActionPreference = "Continue"
+
+            if ([System.IO.Path]::GetExtension($NpmPath) -eq ".cmd") {
+                $CandidateNpmCliPath = Join-Path (Split-Path -Parent $NpmPath) "node_modules\npm\bin\npm-cli.js"
+                if (-not $NodeReady -or -not (Test-Path -LiteralPath $CandidateNpmCliPath -PathType Leaf)) {
+                    throw "npm.cmd 缺少可由 Node.js 直接执行的 npm-cli.js"
+                }
+                $NpmCliPath = $CandidateNpmCliPath
+                $NpmOutput = @(& $NodePath $NpmCliPath --version 2>$null)
+            }
+            else {
+                $NpmOutput = @(& $NpmPath --version 2>$null)
+            }
+            $NpmExitCode = $LASTEXITCODE
+            $NpmVersion = ([string]($NpmOutput | Select-Object -First 1)).Trim()
+            $NpmReady = $NpmExitCode -eq 0 -and $NpmVersion -match '^\d+\.'
         }
         catch {
             $NpmVersion = $null
         }
         finally {
             $env:Path = $PreviousPath
+            $ErrorActionPreference = $PreviousErrorActionPreference
         }
     }
 
     return [pscustomobject]@{
         nodePath = if ($NodeReady) { $NodePath } else { $null }
         npmPath = if ($NpmReady) { $NpmPath } else { $null }
+        npmCliPath = if ($NpmReady) { $NpmCliPath } else { $null }
         nodeVersion = $NodeVersion
         nodeReady = $NodeReady
         npmVersion = $NpmVersion
@@ -195,38 +225,67 @@ function Get-NodeRuntimeInfo {
     }
     $NodePaths = @($NodePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique)
 
+    $Selected = $Candidates | Where-Object { $_.ready } | Select-Object -First 1
+    $TestedPairs = @{}
+    if (-not $Selected) {
+        foreach ($NodePath in $NodePaths) {
+            $SiblingNpmPath = Join-Path (Split-Path -Parent $NodePath) "npm.cmd"
+            if (-not (Test-Path -LiteralPath $SiblingNpmPath -PathType Leaf)) { continue }
+            $PairKey = "$($NodePath.ToLowerInvariant())`n$($SiblingNpmPath.ToLowerInvariant())"
+            $Candidate = Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $SiblingNpmPath -Managed $false
+            $TestedPairs[$PairKey] = $true
+            $Candidates += $Candidate
+            if ($Candidate.ready) {
+                $Selected = $Candidate
+                break
+            }
+        }
+    }
+
     $NpmPaths = @()
     foreach ($NodePath in $NodePaths) {
         $NpmPaths += Join-Path (Split-Path -Parent $NodePath) "npm.cmd"
     }
-    foreach ($CommandName in @("npm.cmd", "npm.exe", "npm")) {
-        $NpmCommand = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($NpmCommand -and -not [string]::IsNullOrWhiteSpace($NpmCommand.Source)) {
-            $NpmPaths += $NpmCommand.Source
+    if (-not $Selected) {
+        foreach ($CommandName in @("npm.cmd", "npm.exe", "npm")) {
+            $NpmCommand = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($NpmCommand -and -not [string]::IsNullOrWhiteSpace($NpmCommand.Source)) {
+                $NpmPaths += $NpmCommand.Source
+            }
         }
-    }
-    $WhereCommand = Get-Command where.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($WhereCommand) {
-        $NpmPaths += @(& $WhereCommand.Source npm.cmd 2>$null)
-        $NpmPaths += @(& $WhereCommand.Source npm 2>$null)
+        $WhereCommand = Get-Command where.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($WhereCommand) {
+            $NpmPaths += @(& $WhereCommand.Source npm.cmd 2>$null)
+            $NpmPaths += @(& $WhereCommand.Source npm 2>$null)
+        }
     }
     $NpmPaths = @($NpmPaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -Unique)
 
-    foreach ($NodePath in $NodePaths) {
-        $SiblingNpmPath = Join-Path (Split-Path -Parent $NodePath) "npm.cmd"
-        $OrderedNpmPaths = @($SiblingNpmPath) + @($NpmPaths | Where-Object { $_ -ne $SiblingNpmPath })
-        $AddedCandidate = $false
-        foreach ($NpmPath in ($OrderedNpmPaths | Select-Object -Unique)) {
-            if (-not (Test-Path -LiteralPath $NpmPath -PathType Leaf)) { continue }
-            $Candidates += Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $NpmPath -Managed $false
-            $AddedCandidate = $true
-        }
-        if (-not $AddedCandidate) {
-            $Candidates += Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $null -Managed $false
+    if (-not $Selected) {
+        foreach ($NodePath in $NodePaths) {
+            $SiblingNpmPath = Join-Path (Split-Path -Parent $NodePath) "npm.cmd"
+            $OrderedNpmPaths = @($SiblingNpmPath) + @($NpmPaths | Where-Object { $_ -ne $SiblingNpmPath })
+            $AddedCandidate = $false
+            foreach ($NpmPath in ($OrderedNpmPaths | Select-Object -Unique)) {
+                if (-not (Test-Path -LiteralPath $NpmPath -PathType Leaf)) { continue }
+                $PairKey = "$($NodePath.ToLowerInvariant())`n$($NpmPath.ToLowerInvariant())"
+                if ($TestedPairs.ContainsKey($PairKey)) { continue }
+                $Candidate = Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $NpmPath -Managed $false
+                $TestedPairs[$PairKey] = $true
+                $Candidates += $Candidate
+                $AddedCandidate = $true
+                if ($Candidate.ready) {
+                    $Selected = $Candidate
+                    break
+                }
+            }
+            if ($Selected) { break }
+            if (-not $AddedCandidate -and -not ($Candidates | Where-Object { $_.nodePath -eq $NodePath } | Select-Object -First 1)) {
+                $Candidates += Get-NodeRuntimeDetails -NodePath $NodePath -NpmPath $null -Managed $false
+            }
         }
     }
 
-    $Selected = $Candidates | Where-Object { $_.ready } | Select-Object -First 1
     if (-not $Selected) {
         $Selected = $Candidates | Where-Object { $_.nodeReady } | Select-Object -First 1
     }
@@ -241,6 +300,7 @@ function Get-NodeRuntimeInfo {
     return [pscustomobject]@{
         nodePath = if ($Selected) { $Selected.nodePath } else { $null }
         npmPath = if ($Selected) { $Selected.npmPath } else { $null }
+        npmCliPath = if ($Selected) { $Selected.npmCliPath } else { $null }
         nodeVersion = if ($Selected) { $Selected.nodeVersion } else { $null }
         nodeReady = if ($Selected) { $Selected.nodeReady } else { $false }
         npmAvailable = if ($Selected) { $Selected.npmAvailable } else { $false }
@@ -378,6 +438,7 @@ switch ($Action) {
                     Select-Object -ExpandProperty LocalPort -Unique
             )
         }
+        $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
 
         [ordered]@{
             running = [bool]$Managed
@@ -386,6 +447,7 @@ switch ($Action) {
             autoStartEnabled = $AutoStart
             firewallPorts = @($FirewallPorts)
             listeningPorts = @($ListeningPorts)
+            portOwnerPid = if ($PortOwner) { [int]$PortOwner.OwningProcess } else { $null }
             nodeReady = $Runtime.nodeReady
             nodeVersion = $Runtime.nodeVersion
             npmAvailable = $Runtime.npmAvailable
@@ -435,9 +497,19 @@ switch ($Action) {
         if (-not $Runtime.nodeReady -or -not $Runtime.npmAvailable) { throw "缺少 Node.js 22+ 或 npm" }
         Push-Location $ServerDir
         try {
-            & $Runtime.npmPath ci --no-audit --no-fund
+            if ($Runtime.npmCliPath) {
+                & $Runtime.nodePath $Runtime.npmCliPath ci --no-audit --no-fund
+            }
+            else {
+                & $Runtime.npmPath ci --no-audit --no-fund
+            }
             if ($LASTEXITCODE -ne 0) { throw "npm ci 失败（退出码 $LASTEXITCODE）" }
-            & $Runtime.npmPath run build
+            if ($Runtime.npmCliPath) {
+                & $Runtime.nodePath $Runtime.npmCliPath run build
+            }
+            else {
+                & $Runtime.npmPath run build
+            }
             if ($LASTEXITCODE -ne 0) { throw "npm run build 失败（退出码 $LASTEXITCODE）" }
         } finally {
             Pop-Location
@@ -452,6 +524,7 @@ switch ($Action) {
         if ($PortOwner) { throw "端口 $Port 已被进程 $($PortOwner.OwningProcess) 占用" }
         $Runtime = Get-NodeRuntimeInfo
         if (-not $Runtime.nodeReady) { throw "缺少 Node.js 22 或更高版本" }
+        Import-ManagedEnvironment
         $QuotedEntryPath = '"' + $EntryPath.Replace('"', '\"') + '"'
         $Child = Start-Process -FilePath $Runtime.nodePath -ArgumentList @($QuotedEntryPath) -WorkingDirectory $ServerDir -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
         Set-Content -LiteralPath $PidPath -Value ([string]$Child.Id) -Encoding ASCII -NoNewline

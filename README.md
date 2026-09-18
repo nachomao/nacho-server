@@ -45,6 +45,23 @@ server/
 
 ---
 
+## 部署模式总览
+
+同一套服务端支持三种部署模式：
+
+| 模式 | 运行位置 | 管理方式 | 是否依赖 WSL |
+|---|---|---|---:|
+| Windows 本机部署 | Windows 仓库 `server/` | 面板本机 API + `deploy/windows/local-control-server.ps1` | 否 |
+| WSL2 部署 | 本机 WSL2 Linux 发行版 | `deploy/install.sh` + systemd | 是 |
+| Linux 服务器部署 | 独立 Linux 主机 | `deploy/install.sh` + systemd | 否 |
+
+- 面板和 Agent 一次只连接一个服务端地址；切换模式时同步更新面板连接与 Agent `serverUrl`。
+- 多种模式同机并存时必须使用不同端口。Windows 本机管理器会检测端口占用；WSL/Linux 由 systemd、`ss` 和健康检查确认。
+- Windows 本机模式不启动 WSL。WSL 只在明确选择该模式或执行 Linux 兼容验证时启动。
+- 三种模式不得共享同一 SQLite 文件或 `.env`；迁移时分别备份并显式复制需要保留的数据。
+
+---
+
 ## 快速开始（开发）
 
 ```bash
@@ -76,7 +93,22 @@ npm run build && npm start
 
 ---
 
-## 一键部署到服务器
+## WSL2 部署
+
+WSL2 使用 Linux 部署链路，适合在本机验证 systemd、Linux 原生依赖和部署脚本，或作为明确选择的本机 Linux 服务。以下命令在 WSL 发行版内部执行：
+
+```bash
+cd server
+sudo ./deploy/install.sh
+systemctl is-active control-server.service
+curl -fsS http://localhost:8443/health
+```
+
+默认运行副本为 `/opt/control-server`。Windows 面板连接 WSL 服务时使用 Windows 可达的地址；如果 Windows 上已有服务占用 8443，应为 WSL 或 Windows 本机服务选择其他端口。普通 Windows 本机部署不会自动启动 WSL。
+
+---
+
+## 一键部署到 Linux 服务器
 
 支持 Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Fedora。脚本会自动安装 Node、创建系统用户、编译代码、生成随机密钥、安装并启动 systemd 服务、放行防火墙端口。
 
@@ -110,7 +142,7 @@ sudo ./deploy/uninstall.sh           # 卸载（保留数据）
 sudo PURGE=1 ./deploy/uninstall.sh   # 卸载并删除数据与用户
 ```
 
-安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。
+安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
 
 ---
 
@@ -287,7 +319,7 @@ curl -s -X POST $BASE/agent/commands/<cmdId>/report \
 - 增量初始化创建 `managed_artifacts`、`deployment_batches`、`deployment_items`，可在旧库及重复启动上执行。
 - 安装结果和服务日志分离：完整结构化结果只在命令记录中，服务日志仅保存 resultBytes 与 exitCode，不复制参数、包正文或结果正文。
 
-## Windows 文件下发与回��
+## Windows 文件下发与回滚
 
 - `POST /api/panel/file-deployments` 接收一个 ready file artifact、无重复的在线 Windows `clientIds`、绝对 `destinationPath`、`fail|replace` 冲突策略和 `createDirectories`，为每台目标创建独立 `deploy-file` 命令并写入复用的 deployment batch/item。
 - `deploy-file` payload 严格包含 `artifactId`、`fileName`、`sha256`、`sizeBytes`、`destinationPath`、`conflictPolicy` 和 `createDirectories`；文件上限为 512 MiB。通用命令接口拒绝绕过专用部署入口。
