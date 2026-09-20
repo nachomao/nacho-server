@@ -18,6 +18,7 @@ $OutputEncoding = $Utf8NoBom
 $ServerDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $EntryPath = [System.IO.Path]::GetFullPath((Join-Path $ServerDir "dist\index.js"))
 $EnvironmentPath = Join-Path $ServerDir ".env"
+$LauncherPath = Join-Path $PSScriptRoot "start-local-control-server.cjs"
 $StateDir = Join-Path $ServerDir ".nacho-local"
 $PidPath = Join-Path $StateDir "server.pid"
 $StdoutPath = Join-Path $StateDir "server.stdout.log"
@@ -31,6 +32,7 @@ $FirewallPrefix = "NachoPanel-Local-Control-"
 function Assert-TrustedProject {
     $ManifestPath = Join-Path $ServerDir "package.json"
     if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "缺少 server/package.json" }
+    if (-not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) { throw "缺少 Windows 本地服务启动器" }
     $Manifest = [System.IO.File]::ReadAllText($ManifestPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     if ($Manifest.name -ne "nacho-server") { throw "目标目录不是 Nacho 服务端项目" }
 }
@@ -539,9 +541,16 @@ try {
         $Runtime = Get-NodeRuntimeInfo
         if (-not $Runtime.nodeReady) { throw "缺少 Node.js 22 或更高版本" }
         Import-ManagedEnvironment
-        $QuotedEntryPath = '"' + $EntryPath.Replace('"', '\"') + '"'
-        $Child = Start-Process -FilePath $Runtime.nodePath -ArgumentList @($QuotedEntryPath) -WorkingDirectory $ServerDir -WindowStyle Hidden -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -PassThru
-        Set-Content -LiteralPath $PidPath -Value ([string]$Child.Id) -Encoding ASCII -NoNewline
+        $LauncherOutput = @(& $Runtime.nodePath $LauncherPath $EntryPath $ServerDir $StdoutPath $StderrPath)
+        $LauncherExitCode = $LASTEXITCODE
+        if ($LauncherExitCode -ne 0) { throw "本机控制服务启动器失败（退出码 $LauncherExitCode）" }
+        $ChildPidText = [string]($LauncherOutput | Select-Object -Last 1)
+        $ChildPid = 0
+        if (-not [int]::TryParse($ChildPidText.Trim(), [ref]$ChildPid) -or $ChildPid -le 0) {
+            throw "本机控制服务启动器未返回有效 PID"
+        }
+        Set-Content -LiteralPath $PidPath -Value ([string]$ChildPid) -Encoding ASCII -NoNewline
+        Write-Output "控制服务进程已启动（PID $ChildPid）"
     }
     "ForceStop" {
         $Managed = Get-ManagedProcess
