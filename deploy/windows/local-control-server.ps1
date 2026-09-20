@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Status", "InstallRuntime", "Build", "Start", "ForceStop", "EnableAutostart", "DisableAutostart", "SetFirewall", "ApplyFirewall", "RemoveFirewall", "RemoveFirewallElevated")]
+    [ValidateSet("Status", "AssertPortAvailable", "InstallRuntime", "Build", "Start", "ForceStop", "EnableAutostart", "DisableAutostart", "SetFirewall", "ApplyFirewall", "RemoveFirewall", "RemoveFirewallElevated")]
     [string]$Action,
 
     [ValidateRange(1024, 65535)]
@@ -11,8 +11,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [Console]::OutputEncoding
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
 $ServerDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $EntryPath = [System.IO.Path]::GetFullPath((Join-Path $ServerDir "dist\index.js"))
 $EnvironmentPath = Join-Path $ServerDir ".env"
@@ -60,6 +62,13 @@ function Get-ManagedProcess {
 
 function Remove-StalePid {
     if ($null -eq (Get-ManagedProcess)) { Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue }
+}
+
+function Assert-PortAvailable([int]$SelectedPort) {
+    $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $SelectedPort -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($PortOwner) {
+        throw "端口 $SelectedPort 已被其他进程占用，请更换监听端口后重试。"
+    }
 }
 
 function Test-Administrator {
@@ -408,9 +417,10 @@ function Get-AutostartCommand {
     return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Action Start -Port {1}' -f $PSCommandPath, $Port
 }
 
-Assert-TrustedProject
+try {
+    Assert-TrustedProject
 
-switch ($Action) {
+    switch ($Action) {
     "Status" {
         Remove-StalePid
         $Runtime = Get-NodeRuntimeInfo
@@ -453,6 +463,9 @@ switch ($Action) {
             npmAvailable = $Runtime.npmAvailable
             runtimeInstallerAvailable = $Runtime.runtimeInstallerAvailable
         } | ConvertTo-Json -Compress
+    }
+    "AssertPortAvailable" {
+        Assert-PortAvailable $Port
     }
     "InstallRuntime" {
         $Runtime = Get-NodeRuntimeInfo
@@ -520,8 +533,7 @@ switch ($Action) {
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
         Remove-StalePid
         if ($null -ne (Get-ManagedProcess)) { exit 0 }
-        $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($PortOwner) { throw "端口 $Port 已被进程 $($PortOwner.OwningProcess) 占用" }
+        Assert-PortAvailable $Port
         $Runtime = Get-NodeRuntimeInfo
         if (-not $Runtime.nodeReady) { throw "缺少 Node.js 22 或更高版本" }
         Import-ManagedEnvironment
@@ -564,4 +576,16 @@ switch ($Action) {
         if (-not (Test-Administrator)) { throw "该操作需要管理员权限" }
         Remove-ManagedFirewallRules
     }
+    }
+}
+catch {
+    $ErrorWriter = [System.IO.StreamWriter]::new([Console]::OpenStandardError(), $Utf8NoBom)
+    try {
+        $ErrorWriter.WriteLine($_.Exception.Message)
+        $ErrorWriter.Flush()
+    }
+    finally {
+        $ErrorWriter.Dispose()
+    }
+    exit 1
 }
