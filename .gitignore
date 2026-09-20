@@ -1,6 +1,7 @@
 node_modules
 dist
 .nacho-runtime
+.nacho-local
 *.log
 
 # 运行时数据与密钥
