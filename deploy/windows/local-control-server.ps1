@@ -510,6 +510,7 @@ try {
         if (-not $Runtime.nodeReady -or -not $Runtime.npmAvailable) { throw "缺少 Node.js 22+ 或 npm" }
         Push-Location $ServerDir
         try {
+            Write-Output '$ npm ci --no-audit --no-fund'
             if ($Runtime.npmCliPath) {
                 & $Runtime.nodePath $Runtime.npmCliPath ci --no-audit --no-fund
             }
@@ -517,6 +518,7 @@ try {
                 & $Runtime.npmPath ci --no-audit --no-fund
             }
             if ($LASTEXITCODE -ne 0) { throw "npm ci 失败（退出码 $LASTEXITCODE）" }
+            Write-Output '$ npm run build'
             if ($Runtime.npmCliPath) {
                 & $Runtime.nodePath $Runtime.npmCliPath run build
             }
