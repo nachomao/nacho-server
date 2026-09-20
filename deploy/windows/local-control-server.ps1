@@ -551,6 +551,7 @@ try {
         }
         Set-Content -LiteralPath $PidPath -Value ([string]$ChildPid) -Encoding ASCII -NoNewline
         Write-Output "控制服务进程已启动（PID $ChildPid）"
+        exit 0
     }
     "ForceStop" {
         $Managed = Get-ManagedProcess
