@@ -132,6 +132,8 @@ sudo PORT=8443 \
 
 Windows 安装器会将完整日志保存到 `%ProgramData%\Nacho\install.log`，并等待设备注册成功后才报告安装完成；关闭开放入网时，输入的 Enrollment key 必须与本目录 `.env` 中的 `ENROLLMENT_KEY` 完全一致。
 
+服务端启动后也可在面板“设置 → 安全”中切换“允许客户端免密注册”。该选项默认关闭；开启后，任何能访问服务端的客户端都可在没有 Enrollment Key 的情况下注册。
+
 常用运维：
 
 ```bash

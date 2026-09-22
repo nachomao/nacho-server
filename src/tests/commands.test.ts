@@ -16,6 +16,7 @@ let canEnroll: typeof import("../lib/auth").canEnroll
 let agentUpdates: typeof import("../services/agent-updates")
 let agentRouter: typeof import("../routes/agent").agentRouter
 let logs: typeof import("../services/logs")
+let settings: typeof import("../services/settings")
 const artifactsPath = path.join(process.cwd(), "tmp-update-artifacts")
 
 before(async () => {
@@ -61,6 +62,7 @@ before(async () => {
   ;({ canEnroll } = await import("../lib/auth"))
   ;({ agentRouter } = await import("../routes/agent"))
   logs = await import("../services/logs")
+  settings = await import("../services/settings")
   agentUpdates = await import("../services/agent-updates")
   initSchema()
 })
@@ -69,6 +71,17 @@ test("open enrollment bypasses the shared key only when configured", () => {
   assert.equal(canEnroll(undefined, true), true)
   assert.equal(canEnroll(undefined, false), false)
   assert.equal(canEnroll("integration-enroll-key", false), true)
+})
+
+test("stored security setting controls open enrollment when no explicit override is passed", () => {
+  settings.saveSettings({ security: { openEnrollment: true } })
+  try {
+    assert.equal(canEnroll(undefined), true)
+    settings.saveSettings({ security: { openEnrollment: false } })
+    assert.equal(canEnroll(undefined), false)
+  } finally {
+    settings.saveSettings({ security: { openEnrollment: false } })
+  }
 })
 
 test("enrollment with the same device id updates one client record", () => {

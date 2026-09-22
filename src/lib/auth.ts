@@ -2,6 +2,7 @@ import crypto from "node:crypto"
 import type { NextFunction, Request, Response } from "express"
 import { config } from "../config"
 import { db } from "../db"
+import { getOpenEnrollmentSetting } from "../services/settings"
 import { fail } from "./http"
 
 /** 从请求中提取令牌：优先 Authorization: Bearer，其次 X-API-Key */
@@ -44,6 +45,11 @@ export function checkEnrollmentKey(key: unknown): boolean {
   return typeof key === "string" && safeEqual(key, config.enrollmentKey)
 }
 
-export function canEnroll(key: unknown, allowOpenEnrollment = config.allowOpenEnrollment): boolean {
-  return allowOpenEnrollment || checkEnrollmentKey(key)
+export function canEnroll(key: unknown, allowOpenEnrollment?: boolean): boolean {
+  const openEnrollment = allowOpenEnrollment ?? getOpenEnrollmentSetting(config.allowOpenEnrollment)
+  return openEnrollment || checkEnrollmentKey(key)
+}
+
+export function isOpenEnrollmentEnabled(): boolean {
+  return getOpenEnrollmentSetting(config.allowOpenEnrollment)
 }

@@ -4,6 +4,7 @@ import type { Request } from "express"
 import { Router } from "express"
 import { config } from "../config"
 import { fail } from "../lib/http"
+import { isOpenEnrollmentEnabled } from "../lib/auth"
 import * as installProfiles from "../services/install-profiles"
 import { renderInstallScript, stripScriptBom } from "../services/install-script"
 
@@ -38,7 +39,7 @@ artifactRouter.get(["/nacho.ps1", "/install.ps1"], (req, res) => {
   const script = renderInstallScript(template, {
     artifactBaseUrl,
     installScriptUrl,
-    openEnrollment: config.allowOpenEnrollment,
+    openEnrollment: isOpenEnrollmentEnabled(),
     profile,
   })
   res.type("text/plain; charset=utf-8").send(script)

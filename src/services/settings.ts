@@ -23,3 +23,12 @@ export function saveSettings(value: Record<string, unknown>, key = DEFAULT_KEY):
   ).run(key, JSON.stringify(value))
   return value
 }
+
+/** 返回面板持久化的免密注册策略；未保存时回退到环境变量默认值。 */
+export function getOpenEnrollmentSetting(fallback: boolean): boolean {
+  const value = getSettings()
+  const security = value?.security
+  if (!security || typeof security !== "object" || Array.isArray(security)) return fallback
+  const openEnrollment = (security as Record<string, unknown>).openEnrollment
+  return typeof openEnrollment === "boolean" ? openEnrollment : fallback
+}
