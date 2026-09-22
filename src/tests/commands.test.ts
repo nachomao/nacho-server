@@ -17,6 +17,7 @@ let agentUpdates: typeof import("../services/agent-updates")
 let agentRouter: typeof import("../routes/agent").agentRouter
 let logs: typeof import("../services/logs")
 let settings: typeof import("../services/settings")
+let enrollmentGuard: typeof import("../services/enrollment-guard")
 const artifactsPath = path.join(process.cwd(), "tmp-update-artifacts")
 
 before(async () => {
@@ -63,6 +64,7 @@ before(async () => {
   ;({ agentRouter } = await import("../routes/agent"))
   logs = await import("../services/logs")
   settings = await import("../services/settings")
+  enrollmentGuard = await import("../services/enrollment-guard")
   agentUpdates = await import("../services/agent-updates")
   initSchema()
 })
@@ -82,6 +84,16 @@ test("stored security setting controls open enrollment when no explicit override
   } finally {
     settings.saveSettings({ security: { openEnrollment: false } })
   }
+})
+
+test("rejected enrollment attempts are rate limited per device and recover after the window", () => {
+  enrollmentGuard.resetEnrollmentGuard()
+  const start = 1_000_000
+  for (let i = 0; i < 5; i++) assert.equal(enrollmentGuard.checkEnrollmentAttempt("10.0.0.1", "device-a", start + i).blocked, false)
+  assert.equal(enrollmentGuard.checkEnrollmentAttempt("10.0.0.1", "device-a", start + 6).blocked, true)
+  assert.equal(enrollmentGuard.checkEnrollmentAttempt("10.0.0.1", "device-b", start + 7).blocked, false)
+  assert.equal(enrollmentGuard.checkEnrollmentAttempt("10.0.0.1", "device-a", start + 60_001).blocked, false)
+  enrollmentGuard.resetEnrollmentGuard()
 })
 
 test("enrollment with the same device id updates one client record", () => {

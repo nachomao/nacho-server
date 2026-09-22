@@ -12,6 +12,7 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
     private readonly StateStore _stateStore;
     private readonly HttpClient _http;
     private readonly SemaphoreSlim _enrollmentGate = new(1, 1);
+    private DateTimeOffset _enrollmentRetryAfterUtc;
 
     public AgentApiClient(IOptions<AgentOptions> options, StateStore stateStore)
         : this(options, stateStore, new SocketsHttpHandler())
@@ -42,6 +43,8 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
         {
             state = _stateStore.Load();
             if (state is not null) return state;
+            var retryAfter = _enrollmentRetryAfterUtc - DateTimeOffset.UtcNow;
+            if (retryAfter > TimeSpan.Zero) await Task.Delay(retryAfter, cancellationToken);
 
             var body = new
             {
@@ -57,9 +60,14 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
                 group = _options.Group,
             };
             using var response = await _http.PostAsJsonAsync("agent/enroll", body, cancellationToken);
+            if ((int)response.StatusCode == 429)
+            {
+                _enrollmentRetryAfterUtc = DateTimeOffset.UtcNow + (response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(60));
+            }
             var envelope = await ReadEnvelopeAsync<EnrollmentResult>(response, AgentJsonContext.Default.ApiEnvelopeEnrollmentResult, cancellationToken);
             var enrolled = envelope.Data ?? throw new InvalidDataException("Enrollment response did not include device credentials.");
             state = new AgentState(enrolled.Client.Id, enrolled.Token);
+            _enrollmentRetryAfterUtc = default;
             _stateStore.Save(state);
             _stateStore.DeleteEnrollmentKey();
             return state;

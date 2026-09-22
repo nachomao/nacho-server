@@ -10,6 +10,7 @@ import { MAX_COMMAND_RESULT_BYTES } from "../services/commands"
 import * as health from "../services/health"
 import * as managedArtifacts from "../services/managed-artifacts"
 import { recordLog } from "../services/logs"
+import { checkEnrollmentAttempt } from "../services/enrollment-guard"
 
 export const agentRouter = Router()
 
@@ -38,10 +39,19 @@ agentRouter.post(
   asyncHandler((req, res) => {
     const body = parseBody(enrollSchema, req.body)
     if (!canEnroll(body.enrollmentKey)) {
+      const ip = clientIp(req)
+      const guard = checkEnrollmentAttempt(ip, body.id)
+      if (guard.blocked) {
+        res.setHeader("Retry-After", String(guard.retryAfter))
+        if (guard.shouldLog) logger.warn(`客户端注册请求触发限流：ip=${JSON.stringify(ip)};id=${JSON.stringify(body.id ?? "")};count=${guard.count}`)
+        return fail(res, "注册请求过于频繁，请稍后重试", 429)
+      }
       // 仅记录定位注册请求所需的元数据，绝不把入网密钥写入日志。
-      const detail = `ip=${JSON.stringify(clientIp(req))};id=${JSON.stringify(body.id ?? "")};name=${JSON.stringify(body.name)};hostname=${JSON.stringify(body.hostname ?? "")}`
-      logger.warn(`客户端注册被拒绝：入网密钥无效；${detail}`)
-      recordLog("warn", "client", "客户端注册被拒绝：入网密钥无效", detail)
+      if (guard.shouldLog) {
+        const detail = `ip=${JSON.stringify(ip)};id=${JSON.stringify(body.id ?? "")};name=${JSON.stringify(body.name)};hostname=${JSON.stringify(body.hostname ?? "")};count=${guard.count}`
+        logger.warn(`客户端注册被拒绝：入网密钥无效；${detail}`)
+        recordLog("warn", "client", "客户端注册被拒绝：入网密钥无效", detail)
+      }
       return fail(res, "入网密钥无效，拒绝注册", 401)
     }
     const { client, token } = clients.registerClient({
