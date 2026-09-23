@@ -66,8 +66,31 @@ function Remove-StalePid {
     if ($null -eq (Get-ManagedProcess)) { Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue }
 }
 
+function Get-TcpListeners {
+    $NetstatPath = Join-Path $env:SystemRoot "System32\netstat.exe"
+    if (-not (Test-Path -LiteralPath $NetstatPath -PathType Leaf)) { throw "未找到 netstat.exe" }
+
+    $Output = @(& $NetstatPath -ano -p tcp)
+    if ($LASTEXITCODE -ne 0) { throw "读取 TCP 监听端口失败（退出码 $LASTEXITCODE）" }
+
+    $Listeners = @()
+    foreach ($Line in $Output) {
+        if ($Line -notmatch '^\s*TCP\s+(?<local>\S+)\s+\S+\s+LISTENING\s+(?<pid>\d+)\s*$') { continue }
+        $LocalEndpoint = [string]$Matches.local
+        $Separator = $LocalEndpoint.LastIndexOf(":")
+        if ($Separator -lt 0) { continue }
+
+        $LocalPort = 0
+        $OwnerPid = 0
+        if (-not [int]::TryParse($LocalEndpoint.Substring($Separator + 1), [ref]$LocalPort)) { continue }
+        if (-not [int]::TryParse([string]$Matches.pid, [ref]$OwnerPid)) { continue }
+        $Listeners += [pscustomobject]@{ LocalPort = $LocalPort; OwningProcess = $OwnerPid }
+    }
+    return @($Listeners)
+}
+
 function Assert-PortAvailable([int]$SelectedPort) {
-    $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $SelectedPort -ErrorAction SilentlyContinue | Select-Object -First 1
+    $PortOwner = Get-TcpListeners | Where-Object { $_.LocalPort -eq $SelectedPort } | Select-Object -First 1
     if ($PortOwner) {
         throw "端口 $SelectedPort 已被其他进程占用，请更换监听端口后重试。"
     }
@@ -433,24 +456,25 @@ try {
         } catch {}
         $FirewallPorts = @()
         try {
-            $Rules = Get-NetFirewallRule -ErrorAction Stop | Where-Object { $_.Name -like "$FirewallPrefix*" }
+            $Rules = Get-NetFirewallRule -Name "$FirewallPrefix*" -ErrorAction SilentlyContinue
             foreach ($Rule in $Rules) {
                 $Filter = $Rule | Get-NetFirewallPortFilter
                 $ParsedPort = 0
                 if ([int]::TryParse([string]$Filter.LocalPort, [ref]$ParsedPort)) { $FirewallPorts += $ParsedPort }
             }
         } catch {}
+        $Listeners = @(Get-TcpListeners)
         $StartedAt = $null
         $ListeningPorts = @()
         if ($Managed) {
             $StartedAt = $Managed.CreationDate.ToUniversalTime().ToString("o")
             $ListeningPorts = @(
-                Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                $Listeners |
                     Where-Object { $_.OwningProcess -eq $Managed.ProcessId } |
                     Select-Object -ExpandProperty LocalPort -Unique
             )
         }
-        $PortOwner = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+        $PortOwner = $Listeners | Where-Object { $_.LocalPort -eq $Port } | Select-Object -First 1
 
         [ordered]@{
             running = [bool]$Managed
