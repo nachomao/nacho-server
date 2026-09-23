@@ -2,8 +2,8 @@ import { db } from "../db"
 import { config } from "../config"
 import { markRead as markHealthRead, markAllRead as markAllHealthRead } from "./health"
 
-export type NotificationSeverity = "warning" | "error" | "critical"
-export type NotificationType = "offline" | "health" | "task"
+export type NotificationSeverity = "info" | "warning" | "error" | "critical"
+export type NotificationType = "offline" | "health" | "task" | "log"
 export type Notification = {
   id: string; type: NotificationType; severity: NotificationSeverity; title: string; desc: string; detail: string
   code: string | null; source: string; deviceId: string | null; time: string; ts: number; read: boolean
@@ -11,9 +11,11 @@ export type Notification = {
 }
 export type GroupedNotification = Notification & { count: number; items?: Notification[] }
 type Row = Record<string, unknown>
+type LogRow = { id: string; ts: number; level: string; source: string; message: string; detail: string | null }
 
 const now = () => Date.now()
-const severityOf = (value: unknown): NotificationSeverity => value === "critical" || value === "error" ? value : "warning"
+const severityOf = (value: unknown): NotificationSeverity => value === "critical" || value === "error" || value === "info" ? value : "warning"
+const logSeverityOf = (level: string): NotificationSeverity => level === "error" ? "critical" : level === "warn" ? "warning" : "info"
 const text = (v: unknown) => typeof v === "string" ? v : ""
 function resultDetail(result: string | null, exitCode: number | null): string {
   if (!result) return `退出码：${exitCode ?? "未知"}`
@@ -23,6 +25,10 @@ function resultDetail(result: string | null, exitCode: number | null): string {
     if (typeof value === "string" && value.trim()) return value.slice(0, 4096)
   } catch { /* 使用受限文本摘要 */ }
   return result.replace(/[\r\n]+/g, " ").slice(0, 1024)
+}
+function logDeviceId(detail: string | null): string | null {
+  const match = detail?.match(/(?:^|;)(?:clientId|client|id)=([^;]+)/)
+  return match?.[1]?.replace(/^"|"$/g, "").slice(0, 240) || null
 }
 function map(row: Row): Notification {
   const ts = Number(row.ts) || now()
@@ -43,6 +49,8 @@ function syncSources() {
   for (const f of findings) { insert({ id:`health:${f.id}`, type:"health", severity:severityOf(f.severity), title:f.title, desc:`${f.host}${f.detail ? `：${f.detail}` : ""}`, detail:f.detail || f.title, code:f.category, source:"health", deviceId:f.client_id, sourceId:f.id, groupKey:`health:${f.category}:${f.host}:${f.title}`, ts:f.ts }); if (f.read) db.prepare("UPDATE notifications SET read=1 WHERE id=?").run(`health:${f.id}`) }
   const failures = db.prepare("SELECT c.id,c.updated_at,c.client_id,c.result,c.exit_code,t.id AS task_id,t.name AS task_name FROM commands c LEFT JOIN tasks t ON t.id=c.task_id WHERE c.status='failed'").all() as Array<{id:string;updated_at:number;client_id:string;result:string|null;exit_code:number|null;task_id:string|null;task_name:string|null}>
   for (const f of failures) insert({ id:`task:${f.id}`, type:"task", severity:"error", title:"任务执行失败", desc:`${f.task_name || "命令"} 在客户端 ${f.client_id} 上执行失败`, detail:resultDetail(f.result,f.exit_code), code:f.exit_code == null ? "TASK_FAILED" : `EXIT_${f.exit_code}`, source:"tasks", deviceId:f.client_id, sourceId:f.id, groupKey:`task:${f.task_id || f.task_name || "unknown"}:${f.client_id}:${f.exit_code ?? "failed"}`, ts:f.updated_at || ts })
+  const logs = db.prepare("SELECT id,ts,level,source,message,detail FROM logs ORDER BY ts DESC LIMIT 100").all() as LogRow[]
+  for (const log of logs) insert({ id:`log:${log.id}`, type:"log", severity:logSeverityOf(log.level), title:log.message, desc:log.source, detail:log.detail || log.message, code:`LOG_${log.level.toUpperCase()}`, source:log.source, deviceId:logDeviceId(log.detail), sourceId:log.id, groupKey:`log:${log.source}:${log.message}`.slice(0, 240), ts:log.ts })
 }
 function tx<T>(fn:()=>T):T { db.exec("BEGIN IMMEDIATE"); try { const v=fn(); db.exec("COMMIT"); return v } catch(e){ db.exec("ROLLBACK"); throw e } }
 function purge(retentionDays=30, maxItems=500, enabled=true) { if (!enabled) return; const days=Math.max(1,Math.min(90,retentionDays)); const max=Math.max(100,Math.min(1000,maxItems)); db.prepare("UPDATE notifications SET dismissed=1 WHERE dismissed=0 AND read=1 AND ts < ?").run(now()-days*86400000); const active=Number((db.prepare("SELECT COUNT(*) AS count FROM notifications WHERE dismissed=0").get() as {count:number}).count); const excess=Math.max(0,active-max); if(excess>0) db.prepare("UPDATE notifications SET dismissed=1 WHERE id IN (SELECT id FROM notifications WHERE dismissed=0 AND read=1 ORDER BY ts ASC LIMIT ?)").run(excess) }

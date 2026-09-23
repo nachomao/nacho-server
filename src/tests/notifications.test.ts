@@ -53,6 +53,26 @@ test("警告与错误来源会生成通知且普通插件更新被过滤", () =>
   assert.equal(second.length, first.length)
 })
 
+test("最近系统日志会物化为通知并保留级别、来源与详情", () => {
+  const timestamp = Date.now()
+  db.prepare("INSERT INTO logs (id,ts,level,source,message,detail) VALUES (?,?,?,?,?,?)")
+    .run("log-info", timestamp, "info", "client", "新客户端注册：测试设备", "id=client-log")
+  db.prepare("INSERT INTO logs (id,ts,level,source,message,detail) VALUES (?,?,?,?,?,?)")
+    .run("log-error", timestamp + 1, "error", "server", "服务端异常", "stack summary")
+
+  const first = notifications.listNotifications(10)
+  const second = notifications.listNotifications(10)
+  assert.equal(first.length, 2)
+  assert.equal(second.length, first.length)
+  assert.deepEqual(new Set(first.map((item) => item.type)), new Set(["log"]))
+  assert.equal(first.find((item) => item.id === "log:log-info")?.severity, "info")
+  assert.equal(first.find((item) => item.id === "log:log-info")?.deviceId, "client-log")
+  assert.equal(first.find((item) => item.id === "log:log-error")?.severity, "critical")
+  assert.equal(first.find((item) => item.id === "log:log-error")?.detail, "stack summary")
+  assert.equal(notifications.clear(), 2)
+  assert.deepEqual(notifications.listNotifications(10), [])
+})
+
 test("全部已读和清空会先物化来源且清空后不会复活", () => {
   insertClient("client-read", Date.now() - 60_000)
   assert.equal(notifications.markAllRead(), 1)
