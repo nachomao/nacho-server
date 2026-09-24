@@ -16,6 +16,12 @@ test("Linux installation installs napl and protects an existing entrypoint", () 
   assert.match(install, /ln -sfn/)
 })
 
+test("Linux installer uses LF line endings so bash accepts strict mode after cloud upload", () => {
+  assert.doesNotMatch(install, /\r/)
+  assert.match(install, /^#!\/usr\/bin\/env bash\n/)
+  assert.match(install, /^set -euo pipefail\n/m)
+})
+
 test("Linux uninstall only removes the entrypoint owned by this installation", () => {
   assert.match(uninstall, /readlink -f/)
   assert.match(uninstall, /\/usr\/local\/bin\/napl/)
