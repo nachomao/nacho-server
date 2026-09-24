@@ -9,6 +9,7 @@ import * as logs from "../services/logs"
 import { getOverview } from "../services/overview"
 import * as plugins from "../services/plugins"
 import * as settings from "../services/settings"
+import { isOpenEnrollmentEnabled } from "../lib/auth"
 import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
@@ -667,7 +668,12 @@ panelRouter.get(
 /* ==================== 设置 ==================== */
 panelRouter.get(
   "/settings",
-  asyncHandler((_req, res) => ok(res, settings.getSettings() ?? {})),
+  asyncHandler((_req, res) => {
+    const stored = settings.getSettings() ?? {}
+    const security = stored.security
+    const savedSecurity = security && typeof security === "object" && !Array.isArray(security) ? security : {}
+    return ok(res, { ...stored, security: { ...savedSecurity, openEnrollment: isOpenEnrollmentEnabled() } })
+  }),
 )
 
 panelRouter.put(

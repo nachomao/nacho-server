@@ -3,6 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
 import express from "express"
+import type http from "node:http"
 import { DatabaseSync } from "node:sqlite"
 import { after, before, test } from "node:test"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
@@ -44,6 +45,7 @@ before(async () => {
   process.env.DATABASE_PATH = databasePath
   process.env.LOG_RETENTION_MAX = "1000"
   process.env.ENROLLMENT_KEY = "integration-enroll-key"
+  delete process.env.ALLOW_OPEN_ENROLLMENT
   process.env.ARTIFACTS_PATH = artifactsPath
   fs.mkdirSync(path.join(artifactsPath, "windows"), { recursive: true })
   const artifact = Buffer.from("synthetic-agent-1.1.0")
@@ -75,6 +77,15 @@ test("open enrollment bypasses the shared key only when configured", () => {
   assert.equal(canEnroll("integration-enroll-key", false), true)
 })
 
+test("new server defaults to open enrollment, while a saved choice takes precedence", async () => {
+  const { config } = await import("../config")
+  assert.equal(config.allowOpenEnrollment, true)
+  settings.saveSettings({})
+  assert.equal(canEnroll(undefined), true)
+  settings.saveSettings({ security: { openEnrollment: false } })
+  assert.equal(canEnroll(undefined), false)
+})
+
 test("stored security setting controls open enrollment when no explicit override is passed", () => {
   settings.saveSettings({ security: { openEnrollment: true } })
   try {
@@ -83,6 +94,32 @@ test("stored security setting controls open enrollment when no explicit override
     assert.equal(canEnroll(undefined), false)
   } finally {
     settings.saveSettings({ security: { openEnrollment: false } })
+  }
+})
+
+test("panel settings reports the effective enrollment policy", async () => {
+  const { panelRouter } = await import("../routes/panel")
+  const { config } = await import("../config")
+  const app = express()
+  app.use("/api/panel", panelRouter)
+  const server = await new Promise<http.Server>((resolve) => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance))
+  })
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== "string")
+    const url = `http://127.0.0.1:${address.port}/api/panel/settings`
+    const headers = { Authorization: `Bearer ${config.panelApiKey}` }
+    settings.saveSettings({})
+    const initial = await fetch(url, { headers })
+    assert.equal(initial.status, 200)
+    assert.equal(((await initial.json()) as { data: { security: { openEnrollment: boolean } } }).data.security.openEnrollment, true)
+    settings.saveSettings({ security: { openEnrollment: false } })
+    const disabled = await fetch(url, { headers })
+    assert.equal(disabled.status, 200)
+    assert.equal(((await disabled.json()) as { data: { security: { openEnrollment: boolean } } }).data.security.openEnrollment, false)
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
 })
 

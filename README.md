@@ -135,7 +135,7 @@ sudo PORT=8443 \
 
 Windows 安装器会将完整日志保存到 `%ProgramData%\Nacho\install.log`，并等待设备注册成功后才报告安装完成；关闭开放入网时，输入的 Enrollment key 必须与本目录 `.env` 中的 `ENROLLMENT_KEY` 完全一致。
 
-服务端启动后也可在面板“设置 → 安全”中切换“允许客户端免密注册”。该选项默认关闭；开启后，任何能访问服务端的客户端都可在没有 Enrollment Key 的情况下注册。
+服务端启动后也可在面板“设置 → 安全”中切换“允许客户端免密注册”。新部署默认开启；开启后，任何能访问服务端的客户端都可在没有 Enrollment Key 的情况下注册。已保存的开关选择及现有 `.env` 中显式配置的值保持不变。
 
 常用运维：
 
@@ -163,7 +163,7 @@ napl uninstall purge                # 确认后彻底删除
 | `HOST` | 监听地址 | `0.0.0.0` |
 | `PANEL_API_KEY` | 面板访问 API 所需密钥（`Authorization: Bearer <key>`） | 必填 |
 | `ENROLLMENT_KEY` | 客户端注册入网密钥 | 必填 |
-| `ALLOW_OPEN_ENROLLMENT` | 是否允许客户端免入网密钥注册 | `false` |
+| `ALLOW_OPEN_ENROLLMENT` | 是否允许客户端免入网密钥注册 | `true` |
 | `PUBLIC_BASE_URL` | 安装脚本写入的外部服务端地址，留空时使用请求地址 | 空 |
 | `TRUST_PROXY` | 是否信任反向代理头以计算外部安装地址 | `false` |
 | `ARTIFACTS_PATH` | Agent 发布制品目录 | `./artifacts` |

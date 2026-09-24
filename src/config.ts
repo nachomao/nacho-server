@@ -36,7 +36,7 @@ export const config = {
   databasePath,
   panelApiKey: process.env.PANEL_API_KEY || "change-me-panel-api-key",
   enrollmentKey: process.env.ENROLLMENT_KEY || "change-me-enrollment-key",
-  allowOpenEnrollment: bool(process.env.ALLOW_OPEN_ENROLLMENT),
+  allowOpenEnrollment: bool(process.env.ALLOW_OPEN_ENROLLMENT, true),
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, ""),
   trustProxy: bool(process.env.TRUST_PROXY),
   artifactsPath,
