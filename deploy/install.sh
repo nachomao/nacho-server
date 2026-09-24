@@ -296,15 +296,19 @@ summary() {
   echo "  监听地址    : ${HOST}:${PORT}"
   echo "  安装目录    : ${INSTALL_DIR}"
   echo "  数据目录    : ${DATA_DIR}"
-  echo "  面板 API Key: $(grep '^PANEL_API_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
-  echo "  注册密钥    : $(grep '^ENROLLMENT_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
+  if [ "${NACHO_HIDE_INSTALL_SECRETS:-0}" != "1" ]; then
+    echo "  面板 API Key: $(grep '^PANEL_API_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
+    echo "  注册密钥    : $(grep '^ENROLLMENT_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
+  fi
   echo
   echo "  健康检查    : curl http://${ip:-127.0.0.1}:${PORT}/health"
   echo "  Windows Agent: irm http://${ip:-127.0.0.1}:${PORT}/nacho.ps1 | iex"
   echo "  查看日志    : journalctl -u ${APP_NAME} -f"
   echo "  重启服务    : systemctl restart ${APP_NAME}"
   echo
-  warn "请在面板「设置」中填入上面的 API Key，并在客户端安装时使用注册密钥。"
+  if [ "${NACHO_HIDE_INSTALL_SECRETS:-0}" != "1" ]; then
+    warn "请在面板「设置」中填入上面的 API Key，并在客户端安装时使用注册密钥。"
+  fi
 }
 
 main() {
