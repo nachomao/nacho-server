@@ -28,6 +28,11 @@ if systemctl list-unit-files 2>/dev/null | grep -q "^${APP_NAME}.service"; then
   systemctl daemon-reload
 fi
 
+entry="/usr/local/bin/napl"
+if [ -L "${entry}" ] && [ "$(readlink -f "${entry}" 2>/dev/null || true)" = "${INSTALL_DIR}/deploy/napl" ]; then
+  rm -f "${entry}"
+fi
+
 log "删除安装目录 ${INSTALL_DIR}"
 rm -rf "${INSTALL_DIR}"
 

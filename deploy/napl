@@ -1,0 +1,717 @@
+#!/usr/bin/env bash
+#
+# Nacho Linux 运维入口。
+#
+# 可通过环境变量覆盖路径以便在隔离夹具中运行：
+#   NAPL_INSTALL_DIR=/opt/control-server
+#   NAPL_DATA_DIR=/var/lib/control-server
+#   NAPL_BACKUP_DIR=/var/backups/control-server
+#
+set -Eeuo pipefail
+
+APP_NAME="${APP_NAME:-control-server}"
+INSTALL_DIR="${NAPL_INSTALL_DIR:-${INSTALL_DIR:-/opt/${APP_NAME}}}"
+DATA_DIR="${NAPL_DATA_DIR:-${DATA_DIR:-/var/lib/${APP_NAME}}}"
+BACKUP_DIR="${NAPL_BACKUP_DIR:-/var/backups/${APP_NAME}}"
+SERVICE_NAME="${NAPL_SERVICE_NAME:-${APP_NAME}.service}"
+ENTRYPOINT="${NAPL_ENTRYPOINT:-/usr/local/bin/napl}"
+REPO="${NAPL_GITHUB_REPO:-nachomao/nacho-main}"
+RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
+PUBLIC_KEY="${NAPL_RELEASE_PUBLIC_KEY:-${INSTALL_DIR}/deploy/napl-release-public.pem}"
+MAX_BACKUPS=10
+
+EXIT_USAGE=2
+EXIT_PRIVILEGE=3
+EXIT_SERVICE=4
+EXIT_VALIDATION=5
+EXIT_INTEGRITY=6
+EXIT_ROLLBACK=7
+
+log() { printf '[napl] %s\n' "$*"; }
+warn() { printf '[napl] 警告：%s\n' "$*" >&2; }
+error() { printf '[napl] 错误：%s\n' "$*" >&2; }
+die() { local code="$1"; shift; error "$*"; exit "$code"; }
+
+run() { "$@"; }
+
+require_root() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    die "$EXIT_PRIVILEGE" "此管理操作需要 root；无终端时不会交互提权。"
+  fi
+  command -v sudo >/dev/null 2>&1 || die "$EXIT_PRIVILEGE" "当前用户不是 root，且系统没有 sudo。"
+  exec sudo -E "$0" "$@"
+}
+
+require_tty() {
+  [ -t 0 ] && [ -t 1 ] || die "$EXIT_USAGE" "此操作需要交互式终端。"
+}
+
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+env_file() { printf '%s/.env' "$INSTALL_DIR"; }
+
+env_get() {
+  local key="$1" file
+  file="$(env_file)"
+  [ -f "$file" ] || return 0
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", $0)
+      sub("[[:space:]]+$", "", $0)
+      print $0
+      exit
+    }
+  ' "$file"
+}
+
+env_get_from() {
+  local key="$1" file="$2"
+  [ -f "$file" ] || return 0
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", $0)
+      sub("[[:space:]]+$", "", $0)
+      print $0
+      exit
+    }
+  ' "$file"
+}
+
+env_set_file() {
+  local file="$1" key="$2" value="$3" temp
+  temp="$(mktemp "${file}.tmp.XXXXXX")"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced = 0 }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      print key "=" value
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) print key "=" value }
+  ' "$file" >"$temp" || { rm -f "$temp"; return 1; }
+  chmod 640 "$temp"
+  chown --reference="$file" "$temp"
+  mv -f "$temp" "$file"
+}
+
+env_set() {
+  env_set_file "$(env_file)" "$1" "$2"
+}
+
+numeric_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+validate_field() {
+  local key="$1" value="$2"
+  case "$key" in
+    HOST)
+      [ -n "$value" ] && [[ "$value" != *[[:space:]]* ]] || return 1
+      ;;
+    PORT)
+      numeric_port "$value" || return 1
+      ;;
+    CORS_ORIGIN)
+      [ -n "$value" ] && [[ "$value" != *[$'\r\n']* ]] || return 1
+      ;;
+    ALLOW_OPEN_ENROLLMENT|TRUST_PROXY)
+      [[ "$value" =~ ^(true|false|1|0|yes|no|on|off)$ ]] || return 1
+      ;;
+    PUBLIC_BASE_URL)
+      [ -z "$value" ] || [[ "$value" =~ ^https?://[^[:space:]]+$ ]] || return 1
+      ;;
+    OFFLINE_THRESHOLD|LOG_RETENTION_MAX)
+      [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -gt 0 ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+port_is_free() {
+  local port="$1"
+  if command_exists ss; then
+    ! ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+  elif command_exists netstat; then
+    ! netstat -ltn 2>/dev/null | awk 'NR > 2 {print $4}' | grep -Eq "(^|:)${port}$"
+  else
+    return 0
+  fi
+}
+
+service_active() {
+  systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null
+}
+
+service_enabled() {
+  systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null
+}
+
+health_url() {
+  local port="${1:-$(env_get PORT)}"
+  printf 'http://127.0.0.1:%s/health' "${port:-8443}"
+}
+
+health_check() {
+  command_exists curl || return 1
+  curl -fsS --max-time 8 "$(health_url)" 2>/dev/null | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
+}
+
+wait_for_health() {
+  local tries=0
+  while [ "$tries" -lt 20 ]; do
+    health_check && return 0
+    sleep 1
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+service_restore_state() {
+  local was_active="$1" was_enabled="$2"
+  if [ "$was_active" = 1 ]; then
+    systemctl start "$SERVICE_NAME" || return 1
+    wait_for_health || return 1
+  else
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+  if [ "$was_enabled" = 1 ]; then
+    systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+}
+
+checkpoint_database() {
+  local db="${1:-${DATA_DIR}/control.db}"
+  [ -f "$db" ] || return 0
+  command_exists node || return 1
+  DB_PATH="$db" node -e '
+    const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(process.env.DB_PATH);
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+    db.close();
+  ' >/dev/null
+}
+
+sha256_file() {
+  sha256sum "$1" | awk '{print tolower($1)}'
+}
+
+copy_path() {
+  local source="$1" target="$2"
+  if [ -d "$source" ]; then
+    mkdir -p "$target"
+    cp -a "$source/." "$target/"
+  elif [ -f "$source" ]; then
+    mkdir -p "$(dirname "$target")"
+    cp -a "$source" "$target"
+  fi
+}
+
+resolve_config_path() {
+  local value="$1" fallback="$2"
+  [ -n "$value" ] || value="$fallback"
+  case "$value" in
+    /*) printf '%s' "$value" ;;
+    *) printf '%s/%s' "$INSTALL_DIR" "$value" ;;
+  esac
+}
+
+backup_manifest() {
+  local root="$1"
+  {
+    local version
+    version="$(node -p 'require(process.argv[1]).version' "${INSTALL_DIR}/package.json" 2>/dev/null || printf 'unknown')"
+    printf '{\n  "createdAt": "%s",\n  "version": "%s",\n  "files": [\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$version"
+    find "$root/payload" -type f -print0 | sort -z | while IFS= read -r -d '' file; do
+      local relative hash size
+      relative="${file#"$root/"}"
+      hash="$(sha256_file "$file")"
+      size="$(wc -c <"$file" | tr -d ' ')"
+      printf '    {"path":"%s","size":%s,"sha256":"%s"},\n' "$relative" "$size" "$hash"
+    done | sed '$ s/,$//'
+    printf '  ]\n}\n'
+  } >"$root/manifest.json"
+}
+
+create_backup() {
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR"
+  local was_active=0 was_enabled=0 stamp stage archive db artifacts health env
+  service_active && was_active=1 || true
+  service_enabled && was_enabled=1 || true
+  stamp="backup-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  stage="$(mktemp -d "${BACKUP_DIR}/.${stamp}.XXXXXX")"
+  archive="${BACKUP_DIR}/${stamp}.tar.gz"
+  db="$(resolve_config_path "$(env_get DATABASE_PATH)" "${DATA_DIR}/control.db")"
+  artifacts="$(resolve_config_path "$(env_get ARTIFACTS_PATH)" "${INSTALL_DIR}/artifacts")"
+  health="$(resolve_config_path "$(env_get HEALTH_ARTIFACTS_PATH)" "${artifacts}/health")"
+  env="$(env_file)"
+  trap 'rm -rf "${stage:-}"' RETURN
+
+  if [ "$was_active" = 1 ]; then systemctl stop "$SERVICE_NAME" || die "$EXIT_SERVICE" "停止服务失败，无法创建一致性备份。"; fi
+  checkpoint_database "$db" || {
+    service_restore_state "$was_active" "$was_enabled" || true
+    die "$EXIT_SERVICE" "SQLite checkpoint 失败。"
+  }
+
+  mkdir -p "$stage/payload/config" "$stage/payload/database" "$stage/payload/artifacts" "$stage/payload/health-artifacts"
+  [ -f "$env" ] && cp -a "$env" "$stage/payload/config/.env"
+  [ -f "$db" ] && cp -a "$db" "$stage/payload/database/control.db"
+  [ -f "${db}-wal" ] && cp -a "${db}-wal" "$stage/payload/database/control.db-wal"
+  [ -f "${db}-shm" ] && cp -a "${db}-shm" "$stage/payload/database/control.db-shm"
+  if [ -d "$artifacts" ]; then cp -a "$artifacts/." "$stage/payload/artifacts/"; fi
+  if [ -d "$health" ]; then cp -a "$health/." "$stage/payload/health-artifacts/"; fi
+  backup_manifest "$stage"
+  tar -czf "$archive" -C "$stage" manifest.json payload
+  chmod 600 "$archive"
+
+  service_restore_state "$was_active" "$was_enabled" || die "$EXIT_SERVICE" "备份已创建，但服务恢复失败：$archive"
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup-*.tar.gz' -printf '%T@ %p\n' |
+    sort -nr | tail -n +$((MAX_BACKUPS + 1)) | cut -d' ' -f2- | xargs -r rm -f
+  printf '%s\n' "$archive"
+}
+
+list_backups() {
+  mkdir -p "$BACKUP_DIR"
+  chmod 700 "$BACKUP_DIR"
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'backup-*.tar.gz' -printf '%TY-%Tm-%Td %TH:%TM:%TS %p\n' | sort -r
+}
+
+verify_backup() {
+  local archive="$1" stage="$2"
+  tar -tzf "$archive" | awk '
+    $0 == "manifest.json" || $0 == "payload/" || $0 ~ /^payload\/[A-Za-z0-9._\/-]+$/ { next }
+    { exit 1 }
+  ' || return 1
+  tar -xzf "$archive" -C "$stage" || return 1
+  [ -f "$stage/manifest.json" ] || return 1
+  command_exists node || return 1
+  MANIFEST="$stage/manifest.json" ROOT="$stage" node - <<'NODE'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const path = require("node:path");
+const root = process.env.ROOT;
+const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST, "utf8"));
+if (!Array.isArray(manifest.files) || !manifest.files.some(x => x.path === "payload/config/.env")) process.exit(1);
+for (const item of manifest.files) {
+  if (!/^payload\/[A-Za-z0-9._/-]+$/.test(item.path) || item.path.split("/").includes("..")) process.exit(1);
+  const file = path.join(root, item.path);
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile() || !fs.realpathSync(file).startsWith(path.resolve(root) + path.sep) || fs.statSync(file).size !== item.size) process.exit(1);
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (hash !== item.sha256) process.exit(1);
+}
+NODE
+}
+
+restore_backup() {
+  require_tty
+  local archive="${1:-}"
+  [ -n "$archive" ] || die "$EXIT_USAGE" "用法：napl backup restore <backup>"
+  [ -f "$archive" ] || [ -f "${BACKUP_DIR}/${archive}" ] || die "$EXIT_VALIDATION" "备份不存在。"
+  [ -f "$archive" ] || archive="${BACKUP_DIR}/${archive}"
+  local confirmation
+  printf '恢复将覆盖当前配置、SQLite 数据和持久化制品。请输入 RESTORE 继续： '
+  IFS= read -r confirmation
+  [ "$confirmation" = RESTORE ] || { log "已取消。"; return 0; }
+  local stage current was_active=0 was_enabled=0 old_env old_db old_artifacts old_health new_env new_db new_artifacts new_health
+  stage="$(mktemp -d "${BACKUP_DIR}/.restore.XXXXXX")"
+  trap 'rm -rf "${stage:-}"' RETURN
+  verify_backup "$archive" "$stage" || die "$EXIT_INTEGRITY" "备份文件或 manifest 校验失败。"
+
+  current="$(create_backup)"
+  service_active && was_active=1 || true
+  service_enabled && was_enabled=1 || true
+  [ "$was_active" = 1 ] && systemctl stop "$SERVICE_NAME" || true
+
+  old_env="$(env_file)"
+  old_db="$(resolve_config_path "$(env_get DATABASE_PATH)" "${DATA_DIR}/control.db")"
+  old_artifacts="$(resolve_config_path "$(env_get ARTIFACTS_PATH)" "${INSTALL_DIR}/artifacts")"
+  old_health="$(resolve_config_path "$(env_get HEALTH_ARTIFACTS_PATH)" "${old_artifacts}/health")"
+  new_env="$stage/payload/config/.env"
+  new_db="$(resolve_config_path "$(env_get_from DATABASE_PATH "$new_env")" "${DATA_DIR}/control.db")"
+  new_artifacts="$(resolve_config_path "$(env_get_from ARTIFACTS_PATH "$new_env")" "${INSTALL_DIR}/artifacts")"
+  new_health="$(resolve_config_path "$(env_get_from HEALTH_ARTIFACTS_PATH "$new_env")" "${new_artifacts}/health")"
+  if [ "$old_db" != "$new_db" ] || [ "$old_artifacts" != "$new_artifacts" ] || [ "$old_health" != "$new_health" ]; then
+    service_restore_state "$was_active" "$was_enabled" || die "$EXIT_ROLLBACK" "备份路径与当前安装不匹配，服务恢复失败；当前状态备份：$current"
+    die "$EXIT_VALIDATION" "备份的数据库或制品目录与当前安装不匹配，原状态未修改。"
+  fi
+
+  local rollback_stage
+  rollback_stage="$(mktemp -d "${BACKUP_DIR}/.rollback.XXXXXX")"
+  copy_path "$old_env" "$rollback_stage/config/.env"
+  copy_path "$old_db" "$rollback_stage/database/control.db"
+  copy_path "$old_artifacts" "$rollback_stage/artifacts"
+  copy_path "$old_health" "$rollback_stage/health-artifacts"
+  if ! {
+    cp -a "$new_env" "$old_env"
+    mkdir -p "$(dirname "$new_db")" "$(dirname "$new_artifacts")" "$(dirname "$new_health")"
+    rm -f "$new_db" "${new_db}-wal" "${new_db}-shm"
+    rm -rf "$new_artifacts" "$new_health"
+    copy_path "$stage/payload/database/control.db" "$new_db"
+    copy_path "$stage/payload/database/control.db-wal" "${new_db}-wal"
+    copy_path "$stage/payload/database/control.db-shm" "${new_db}-shm"
+    copy_path "$stage/payload/artifacts" "$new_artifacts"
+    copy_path "$stage/payload/health-artifacts" "$new_health"
+  }; then
+    rm -rf "$rollback_stage"
+    die "$EXIT_ROLLBACK" "恢复写入失败；当前状态备份：$current"
+  fi
+
+  if [ "$was_active" = 1 ]; then
+    if ! systemctl start "$SERVICE_NAME" || ! wait_for_health; then
+      systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+      [ -f "$rollback_stage/config/.env" ] && cp -a "$rollback_stage/config/.env" "$old_env"
+      [ -f "$rollback_stage/database/control.db" ] && cp -a "$rollback_stage/database/control.db" "$old_db"
+      rm -rf "$old_artifacts" "$old_health"
+      copy_path "$rollback_stage/artifacts" "$old_artifacts"
+      copy_path "$rollback_stage/health-artifacts" "$old_health"
+      systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+      rm -rf "$rollback_stage"
+      die "$EXIT_ROLLBACK" "恢复后的健康检查失败，已尝试回滚；当前状态备份：$current"
+    fi
+  fi
+  rm -rf "$rollback_stage"
+  printf '%s\n' "$archive"
+}
+
+service_action() {
+  local action="$1"
+  case "$action" in
+    start|stop|restart) ;;
+    *) die "$EXIT_USAGE" "不支持的服务操作。" ;;
+  esac
+  systemctl "$action" "$SERVICE_NAME" || die "$EXIT_SERVICE" "服务操作失败：$action"
+  if [ "$action" != stop ]; then
+    wait_for_health || die "$EXIT_SERVICE" "服务已执行 $action，但本机健康检查失败。"
+  fi
+  log "服务操作完成：$action"
+}
+
+show_status() {
+  local version host port disk health status
+  version="$(node -p 'require(process.argv[1]).version' "${INSTALL_DIR}/package.json" 2>/dev/null || printf 'unknown')"
+  host="$(env_get HOST)"; port="$(env_get PORT)"; host="${host:-0.0.0.0}"; port="${port:-8443}"
+  if service_active; then status="active"; else status="inactive"; fi
+  if health_check; then health="ok"; else health="failed"; fi
+  disk="$(df -h "$INSTALL_DIR" 2>/dev/null | awk 'NR==2 {print $4 " free / " $5 " used"}' || printf 'unknown')"
+  printf '版本：%s\n服务：%s (%s)\n监听：%s:%s\n健康：%s\n磁盘：%s\n' "$version" "$SERVICE_NAME" "$status" "$host" "$port" "$health" "$disk"
+  if [ "$status" = active ] && [ "$health" = ok ]; then
+    return 0
+  fi
+  return "$EXIT_SERVICE"
+}
+
+config_menu() {
+  require_tty
+  local file backup was_active=0 was_enabled=0 key current value new_port old_port staged confirmation
+  file="$(env_file)"
+  [ -f "$file" ] || die "$EXIT_VALIDATION" "配置文件不存在：$file"
+  backup="${file}.napl-before-config-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -a "$file" "$backup"
+  staged="$(mktemp "${file}.napl-staged.XXXXXX")"
+  cp -a "$file" "$staged"
+  service_active && was_active=1 || true
+  service_enabled && was_enabled=1 || true
+  old_port="$(env_get PORT)"; new_port="$old_port"
+  for key in HOST PORT CORS_ORIGIN ALLOW_OPEN_ENROLLMENT PUBLIC_BASE_URL TRUST_PROXY OFFLINE_THRESHOLD LOG_RETENTION_MAX; do
+    current="$(env_get "$key")"
+    printf '%s [%s]: ' "$key" "$current"
+    IFS= read -r value
+    [ -n "$value" ] || value="$current"
+    validate_field "$key" "$value" || { rm -f "$backup" "$staged"; die "$EXIT_VALIDATION" "配置字段无效：$key"; }
+    [ "$key" = PORT ] && new_port="$value"
+    env_set_file "$staged" "$key" "$value" || { rm -f "$backup" "$staged"; die "$EXIT_VALIDATION" "配置写入失败。"; }
+  done
+  printf '变更预览（密钥已隐藏）：\n'
+  diff -u <(sed -E 's/^(PANEL_API_KEY|ENROLLMENT_KEY|LOCAL_CONTROL_TOKEN)=.*/\1=***隐藏***/' "$file") \
+    <(sed -E 's/^(PANEL_API_KEY|ENROLLMENT_KEY|LOCAL_CONTROL_TOKEN)=.*/\1=***隐藏***/' "$staged") || true
+  printf '输入 APPLY 确认：'
+  IFS= read -r confirmation
+  if [ "$confirmation" != APPLY ]; then
+    rm -f "$backup" "$staged"
+    log "已取消。"
+    return 0
+  fi
+  if [ "$new_port" != "$old_port" ] && ! port_is_free "$new_port"; then
+    rm -f "$backup" "$staged"
+    die "$EXIT_VALIDATION" "端口已被占用：$new_port"
+  fi
+  mv -f "$staged" "$file" || { rm -f "$backup" "$staged"; die "$EXIT_VALIDATION" "配置原子写入失败。"; }
+  if [ "$was_active" = 1 ]; then
+    if ! systemctl restart "$SERVICE_NAME" || ! wait_for_health; then
+      cp -a "$backup" "$file"
+      if ! systemctl restart "$SERVICE_NAME" || ! wait_for_health; then
+        die "$EXIT_ROLLBACK" "配置健康检查失败，旧配置已恢复但服务恢复失败。"
+      fi
+      die "$EXIT_SERVICE" "配置应用或健康检查失败，已恢复旧配置与服务。"
+    fi
+  fi
+  rm -f "$backup"
+  log "配置已更新。端口变更后请同步面板、Agent、反向代理和防火墙。"
+}
+
+rotate_key() {
+  require_tty
+  local key label confirmation new_value old_file backup was_active=0
+  case "${1:-}" in
+    panel) key=PANEL_API_KEY; label="Panel API Key" ;;
+    enrollment) key=ENROLLMENT_KEY; label="Enrollment Key" ;;
+    *) die "$EXIT_USAGE" "用法：napl keys panel|enrollment" ;;
+  esac
+  printf '即将轮换 %s。请输入 ROTATE %s 继续： ' "$label" "$label"
+  IFS= read -r confirmation
+  [ "$confirmation" = "ROTATE $label" ] || { log "已取消。"; return 0; }
+  command_exists openssl || die "$EXIT_VALIDATION" "需要 openssl 生成密钥。"
+  new_value="$(openssl rand -hex 24)" || die "$EXIT_VALIDATION" "随机密钥生成失败。"
+  old_file="$(env_file)"
+  backup="${old_file}.napl-before-key-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -a "$old_file" "$backup"
+  service_active && was_active=1 || true
+  env_set "$key" "$new_value" || { cp -a "$backup" "$old_file"; die "$EXIT_VALIDATION" "密钥写入失败。"; }
+  if [ "$was_active" = 1 ] && { ! systemctl restart "$SERVICE_NAME" || ! wait_for_health; }; then
+    cp -a "$backup" "$old_file"
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "$EXIT_SERVICE" "密钥轮换后服务未通过健康检查，已恢复旧密钥。"
+  fi
+  rm -f "$backup"
+  printf '%s：%s\n' "$label" "$new_value"
+  if [ "$key" = PANEL_API_KEY ]; then
+    printf '%s\n' "面板现有连接需要更新 API Key。设备 token 不变。"
+  else
+    printf '%s\n' "新设备入网配置需要更新 Enrollment Key。设备 token 不变。"
+  fi
+}
+
+logs_command() {
+  if [ "${1:-}" = "--follow" ]; then
+    exec journalctl -u "$SERVICE_NAME" -f
+  fi
+  journalctl -u "$SERVICE_NAME" -n 100 --no-pager
+}
+
+read_json_field() {
+  local field="$1" file="$2"
+  node -e 'const fs=require("fs"); const v=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))[process.argv[2]]; if (typeof v === "string") process.stdout.write(v);' "$file" "$field"
+}
+
+download_release() {
+  local url="$1" output="$2"
+  command_exists curl || return 1
+  curl --fail --location --silent --show-error --max-time 60 -H 'Accept: application/vnd.github+json' "$url" -o "$output"
+}
+
+latest_release_asset() {
+  local metadata="$1"
+  [ -s "$metadata" ] || return 1
+  node - "$metadata" <<'NODE'
+const fs = require("node:fs");
+const data = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (!data || data.draft || data.prerelease || !Array.isArray(data.assets)) process.exit(1);
+const asset = data.assets.find((item) => /^control-server-\d+\.\d+\.\d+-linux-x64\.tar\.gz$/.test(item.name));
+const sig = data.assets.find((item) => item.name === "manifest.sig");
+const manifest = data.assets.find((item) => item.name === "manifest.json");
+if (!asset || !sig || !manifest) process.exit(1);
+if (data.tag_name !== "v" + asset.name.match(/^control-server-(.*)-linux-x64\.tar\.gz$/)[1]) process.exit(1);
+for (const item of [asset, sig, manifest]) {
+  if (typeof item.browser_download_url !== "string" || !/^https:\/\/github\.com\/nachomao\/nacho-main\/releases\/download\//.test(item.browser_download_url)) process.exit(1);
+}
+process.stdout.write(JSON.stringify({ tag: data.tag_name || "", asset: asset.browser_download_url, sig: sig.browser_download_url, manifest: manifest.browser_download_url }));
+NODE
+}
+
+verify_release_manifest() {
+  local root="$1"
+  [ -f "$root/manifest.json" ] && [ -f "$root/manifest.sig" ] || return 1
+  command_exists openssl || return 1
+  command_exists node || return 1
+  [ -f "$PUBLIC_KEY" ] || return 1
+  openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -sigfile "$root/manifest.sig" -in "$root/manifest.json" -rawin >/dev/null 2>&1 || return 1
+  MANIFEST="$root/manifest.json" ROOT="$root" node - <<'NODE'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const path = require("node:path");
+const root = process.env.ROOT;
+const m = JSON.parse(fs.readFileSync(process.env.MANIFEST, "utf8"));
+if (!/^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$/.test(m.version || "") || !Array.isArray(m.files)) process.exit(1);
+for (const item of m.files || []) {
+  if (!item.path || item.path.startsWith("/") || item.path.split("/").includes("..")) process.exit(1);
+  const file = path.join(root, item.path);
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile() || !fs.realpathSync(file).startsWith(path.resolve(root) + path.sep) || fs.statSync(file).size !== item.size) process.exit(1);
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (hash !== item.sha256) process.exit(1);
+}
+NODE
+}
+
+update_check() {
+  local temp metadata info
+  temp="$(mktemp -d)"
+  trap 'rm -rf "${temp:-}"' RETURN
+  metadata="$temp/latest.json"
+  if ! download_release "$RELEASE_API" "$metadata" 2>/dev/null; then
+    log "暂无可用在线版本。"
+    return 0
+  fi
+  if ! info="$(latest_release_asset "$metadata" 2>/dev/null)"; then
+    log "暂无可用在线版本。"
+    return 0
+  fi
+  printf '%s\n' "$info"
+}
+
+install_release() {
+  local package="${1:-}" temp metadata info url sig_url manifest_url stage archive was_active=0 was_enabled=0 current backup old_dir
+  temp="$(mktemp -d)"
+  trap 'rm -rf "${temp:-}"' RETURN
+  if [ -n "$package" ]; then
+    [ -f "$package" ] || die "$EXIT_VALIDATION" "本地升级包不存在：$package"
+    cp -a "$package" "$temp/package.tar.gz"
+    archive="$temp/package.tar.gz"
+    case "$package" in *.tar.gz) ;; *) die "$EXIT_VALIDATION" "本地升级包必须是 .tar.gz";; esac
+    mkdir -p "$temp/release"
+    tar -xzf "$archive" -C "$temp/release" || die "$EXIT_INTEGRITY" "本地升级包解包失败。"
+  else
+    metadata="$temp/latest.json"
+    download_release "$RELEASE_API" "$metadata" || die "$EXIT_INTEGRITY" "在线版本查询失败。"
+    info="$(latest_release_asset "$metadata" 2>/dev/null)" || die "$EXIT_INTEGRITY" "暂无可用在线版本。"
+    url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.asset)' "$info")"
+    sig_url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.sig)' "$info")"
+    manifest_url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.manifest)' "$info")"
+    download_release "$url" "$temp/package.tar.gz" || die "$EXIT_INTEGRITY" "升级包下载中断。"
+    mkdir -p "$temp/release"
+    tar -xzf "$temp/package.tar.gz" -C "$temp/release" || die "$EXIT_INTEGRITY" "在线升级包解包失败。"
+    download_release "$sig_url" "$temp/release/manifest.sig" || die "$EXIT_INTEGRITY" "签名下载失败。"
+    download_release "$manifest_url" "$temp/release/manifest.json" || die "$EXIT_INTEGRITY" "清单下载失败。"
+  fi
+  verify_release_manifest "$temp/release" || die "$EXIT_INTEGRITY" "升级包签名或文件哈希校验失败。"
+  [ -d "$temp/release/dist" ] || die "$EXIT_INTEGRITY" "升级包缺少 dist。"
+
+  current="$(create_backup)"
+  service_active && was_active=1 || true
+  service_enabled && was_enabled=1 || true
+  [ "$was_active" = 1 ] && systemctl stop "$SERVICE_NAME" || true
+  old_dir="$(mktemp -d "${INSTALL_DIR}/.napl-old.XXXXXX")"
+  for item in dist node_modules package.json package-lock.json deploy; do
+    [ -e "$INSTALL_DIR/$item" ] && mv "$INSTALL_DIR/$item" "$old_dir/$item"
+  done
+  if ! {
+    for item in dist node_modules package.json package-lock.json deploy; do
+      [ -e "$temp/release/$item" ] && cp -a "$temp/release/$item" "$INSTALL_DIR/$item"
+    done
+    [ -x "$INSTALL_DIR/deploy/napl" ] && ln -sfn "$INSTALL_DIR/deploy/napl" "$ENTRYPOINT"
+  }; then
+    rm -rf "$INSTALL_DIR/dist" "$INSTALL_DIR/node_modules" "$INSTALL_DIR/deploy"
+    for item in dist node_modules package.json package-lock.json deploy; do
+      [ -e "$old_dir/$item" ] && mv "$old_dir/$item" "$INSTALL_DIR/$item"
+    done
+    [ "$was_active" = 1 ] && systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "$EXIT_ROLLBACK" "升级切换失败；当前状态备份：$current"
+  fi
+  if [ "$was_active" = 1 ] && { ! systemctl start "$SERVICE_NAME" || ! wait_for_health; }; then
+    systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -rf "$INSTALL_DIR/dist" "$INSTALL_DIR/node_modules" "$INSTALL_DIR/deploy"
+    for item in dist node_modules package.json package-lock.json deploy; do
+      [ -e "$old_dir/$item" ] && mv "$old_dir/$item" "$INSTALL_DIR/$item"
+    done
+    if ! systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || ! wait_for_health; then
+      die "$EXIT_ROLLBACK" "升级健康检查失败，旧版本已恢复但服务恢复失败；当前状态备份：$current"
+    fi
+    die "$EXIT_SERVICE" "升级健康检查失败，已恢复旧版本；当前状态备份：$current"
+  fi
+  rm -rf "$old_dir"
+  log "升级完成。"
+}
+
+uninstall_command() {
+  require_tty
+  local mode="${1:-}"
+  [[ "$mode" = keep-data || "$mode" = purge ]] || die "$EXIT_USAGE" "用法：napl uninstall keep-data|purge"
+  local phrase
+  if [ "$mode" = purge ]; then
+    printf '将彻底删除配置、数据库、制品和数据。请输入 DELETE ALL 继续： '
+    IFS= read -r phrase
+    [ "$phrase" = "DELETE ALL" ] || { log "已取消。"; return 0; }
+  else
+    printf '将删除服务与安装文件但保留数据。请输入 KEEP DATA 继续： '
+    IFS= read -r phrase
+    [ "$phrase" = "KEEP DATA" ] || { log "已取消。"; return 0; }
+  fi
+  systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/${SERVICE_NAME}"
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if [ -L "$ENTRYPOINT" ] && [ "$(readlink -f "$ENTRYPOINT" 2>/dev/null || true)" = "$INSTALL_DIR/deploy/napl" ]; then
+    rm -f "$ENTRYPOINT"
+  fi
+  rm -rf "$INSTALL_DIR"
+  if [ "$mode" = purge ]; then
+    rm -rf "$DATA_DIR" "$BACKUP_DIR"
+    id "${APP_USER:-control}" >/dev/null 2>&1 && userdel "${APP_USER:-control}" >/dev/null 2>&1 || true
+  fi
+  log "卸载完成：$mode"
+}
+
+menu() {
+  require_tty
+  while true; do
+    cat <<'MENU'
+
+Nacho Linux 服务端运维菜单
+1) 运行概览
+2) 服务控制
+3) 日志
+4) 配置
+5) 密钥
+6) 备份与恢复
+7) 升级
+8) 卸载
+0) 退出
+MENU
+    printf '请选择：'
+    local choice
+    IFS= read -r choice
+    case "$choice" in
+      1) show_status || true ;;
+      2) printf 'start/stop/restart：'; IFS= read -r choice; service_action "$choice" ;;
+      3) logs_command ;;
+      4) config_menu ;;
+      5) printf 'panel/enrollment：'; IFS= read -r choice; rotate_key "$choice" ;;
+      6) printf 'list/create/restore：'; IFS= read -r choice; case "$choice" in list) list_backups;; create) create_backup;; restore) printf '备份文件：'; IFS=read -r choice; restore_backup "$choice";; *) die "$EXIT_USAGE" "无效选择";; esac ;;
+      7) printf 'check/install：'; IFS= read -r choice; [ "$choice" = check ] && update_check || install_release ;;
+      8) printf 'keep-data/purge：'; IFS= read -r choice; uninstall_command "$choice" ;;
+      0) return 0 ;;
+      *) warn "无效选择。" ;;
+    esac
+  done
+}
+
+main() {
+  [ -d "$INSTALL_DIR" ] || die "$EXIT_VALIDATION" "安装目录不存在：$INSTALL_DIR"
+  case "${1:-}" in
+    ""|status|logs) ;;
+    backup) [ "${2:-}" = list ] || require_root "$@" ;;
+    update) [ "${2:-}" = check ] || require_root "$@" ;;
+    *) require_root "$@" ;;
+  esac
+  case "${1:-}" in
+    "") menu ;;
+    status) show_status ;;
+    start|stop|restart) service_action "$1" ;;
+    logs) shift; logs_command "$@" ;;
+    config) config_menu ;;
+    keys) shift; rotate_key "$@" ;;
+    backup)
+      shift
+      case "${1:-}" in list) list_backups;; create) create_backup;; restore) shift; restore_backup "$@";; *) die "$EXIT_USAGE" "用法：napl backup list|create|restore <backup>";; esac
+      ;;
+    update)
+      shift
+      case "${1:-}" in check) update_check;; install) shift; install_release "$@";; *) die "$EXIT_USAGE" "用法：napl update check|install [package]";; esac
+      ;;
+    uninstall) shift; uninstall_command "$@" ;;
+    *) die "$EXIT_USAGE" "未知命令：$1" ;;
+  esac
+}
+
+main "$@"

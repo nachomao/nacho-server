@@ -187,6 +187,7 @@ deploy_code() {
 
   log "裁剪为仅生产依赖"
   npm prune --omit=dev
+  chmod 755 "${INSTALL_DIR}/deploy/napl"
 }
 
 # ---------------------------------------------------------------------------
@@ -215,7 +216,7 @@ PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 TRUST_PROXY=${TRUST_PROXY}
 ARTIFACTS_PATH=${INSTALL_DIR}/artifacts
 EOF
-  chmod 600 "${env_file}"
+  chmod 640 "${env_file}"
 }
 
 # ---------------------------------------------------------------------------
@@ -255,6 +256,17 @@ WantedBy=multi-user.target
 EOF
 
   chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+  chown "root:${APP_USER}" "${INSTALL_DIR}/.env"
+  chmod 640 "${INSTALL_DIR}/.env"
+
+  local entry="/usr/local/bin/napl"
+  if [ -e "${entry}" ] || [ -L "${entry}" ]; then
+    if [ "$(readlink -f "${entry}" 2>/dev/null || true)" != "${INSTALL_DIR}/deploy/napl" ]; then
+      err "${entry} 已由其他安装占用，停止以避免覆盖。"
+      exit 1
+    fi
+  fi
+  ln -sfn "${INSTALL_DIR}/deploy/napl" "${entry}"
 
   systemctl daemon-reload
   systemctl enable "${APP_NAME}.service"

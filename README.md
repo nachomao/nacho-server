@@ -38,7 +38,10 @@ server/
 │   └── scripts/seed.ts     # 演示数据
 ├── deploy/
 │   ├── install.sh          # 一键部署（Ubuntu/Debian/CentOS）
-│   └── uninstall.sh        # 卸载
+│   ├── uninstall.sh        # 卸载
+│   ├── napl                 # Linux 运维菜单与非交互 CLI
+│   ├── build-release.mjs    # Linux x64 发布包制作与签名
+│   └── napl-release-public.pem # 发布 manifest 公钥
 ├── .env.example
 └── package.json
 ```
@@ -137,14 +140,18 @@ Windows 安装器会将完整日志保存到 `%ProgramData%\Nacho\install.log`�
 常用运维：
 
 ```bash
-systemctl status control-server      # 查看状态
-journalctl -u control-server -f      # 实时日志
-systemctl restart control-server     # 重启
-sudo ./deploy/uninstall.sh           # 卸载（保留数据）
-sudo PURGE=1 ./deploy/uninstall.sh   # 卸载并删除数据与用户
+napl status                         # 运行概览
+napl start|stop|restart             # 服务控制
+napl logs --follow                  # 实时日志
+napl backup list|create             # 备份
+napl update check                   # 检查公开稳定 Release
+napl uninstall keep-data            # 卸载并保留数据
+napl uninstall purge                # 确认后彻底删除
 ```
 
 安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
+
+`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存到 `/var/backups/control-server`，保留最近 10 份。配置变更会先显示预览并在重启或健康检查失败时自动恢复。Panel API Key 与 Enrollment Key 分开轮换，设备 token 不变。在线升级只读取公开仓库 `nachomao/nacho-main` 的稳定 Release，并使用 Ed25519 签名和 manifest SHA-256 校验；没有合格 Release 时显示“暂无可用在线版本”。
 
 ---
 
