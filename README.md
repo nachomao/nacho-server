@@ -1,18 +1,20 @@
-# Nacho 服务端（Control Server）
+# Nacho 服务端（nacho-server / Control Server）
 
 三层架构中的**核心控制节点**。它是唯一的持久化与调度中心：
 
 ```
 ┌───────────┐      面板 API Key       ┌────────────────┐     客户端令牌 / WS      ┌───────────┐
 │   面板     │  ───────────────────▶  │    服务端       │  ◀───────────────────▶  │  客户端    │
-│  (Web UI) │  ◀───────────────────  │ (本项目/本目录) │                          │  (Agent)  │
+│  (Web UI) │  ◀───────────────────  │  (nacho-server)│                          │  (Agent)  │
 └───────────┘   概览/客户端/任务/日志   └────────────────┘   注册/心跳/拉取/上报     └───────────┘
                   /插件/健康/设置            SQLite
 ```
 
+本仓库是**独立仓库**，只包含 Nacho 的服务端与 Windows Agent 源码，不包含面板前端（面板见 `nachomao/nacho-main`）。
+
 - **面板** 只是前端 UI，不存任何业务数据，全部通过 `/api/panel/*` 读写服务端。
-- **服务端**（本目录）负责：存储业务数据、管理客户端注册与在线状态、为面板提供 API、把任务/指令**下发**到客户端、接收并记录执行结果。
-- **客户端 Agent** 通过 `/agent/*` 注册、上报心跳与指标、拉取待执行指令、回报结果，并可用 WebSocket 保持长连接以实时接收下发。
+- **服务端**（本仓库）负责：存储业务数据、管理客户端注册与在线状态、为面板提供 API、把任务/指令**下发**到客户端、接收并记录执行结果。
+- **客户端 Agent** 源码在本仓库的 `client/`（.NET 10），通过 `/agent/*` 注册、上报心跳与指标、拉取待执行指令、回报结果，并可用 WebSocket 保持长连接以实时接收下发。
 
 Linux 上只运行一个 `control-server` 进程与 systemd 单元。Windows Agent 的安装脚本、版本清单和 exe 下载都是该服务的内置 HTTP 路由，共用同一地址和端口，不存在单独的部署服务端。
 
@@ -23,7 +25,7 @@ Linux 上只运行一个 `control-server` 进程与 systemd 单元。Windows Age
 ## 目录结构
 
 ```
-server/
+nacho-server/            # 本仓库根目录即服务端项目根目录
 ├── src/
 │   ├── index.ts            # 入口：Express + HTTP + WebSocket + 离线扫描
 │   ├── config.ts           # 环境变量配置
@@ -36,6 +38,10 @@ server/
 │   ├── services/           # 业务逻辑（clients/tasks/commands/logs/plugins/health/settings/overview/realtime）
 │   ├── ws.ts               # 客户端 WebSocket 长连接
 │   └── scripts/seed.ts     # 演示数据
+├── client/                 # Windows Agent（.NET 10），产物发布到 artifacts/windows
+│   ├── src/Nacho.Agent/
+│   ├── tests/
+│   └── deploy/publish.ps1  # 生成并校验 Agent 单文件制品
 ├── deploy/
 │   ├── install.sh          # 一键部署（Ubuntu/Debian/CentOS）
 │   ├── uninstall.sh        # 卸载
@@ -54,7 +60,7 @@ server/
 
 | 模式 | 运行位置 | 管理方式 | 是否依赖 WSL |
 |---|---|---|---:|
-| Windows 本机部署 | Windows 仓库 `server/` | 面板本机 API + `deploy/windows/local-control-server.ps1` | 否 |
+| Windows 本机部署 | Windows 本仓库 | 面板本机 API + `deploy/windows/local-control-server.ps1` | 否 |
 | WSL2 部署 | 本机 WSL2 Linux 发行版 | `deploy/install.sh` + systemd | 是 |
 | Linux 服务器部署 | 独立 Linux 主机 | `deploy/install.sh` + systemd | 否 |
 
@@ -68,7 +74,6 @@ server/
 ## 快速开始（开发）
 
 ```bash
-cd server
 cp .env.example .env      # 按需修改密钥与端口
 npm install
 npm run seed              # 可选：写入演示数据
@@ -101,7 +106,6 @@ npm run build && npm start
 WSL2 使用 Linux 部署链路，适合在本机验证 systemd、Linux 原生依赖和部署脚本，或作为明确选择的本机 Linux 服务。以下命令在 WSL 发行版内部执行：
 
 ```bash
-cd server
 sudo ./deploy/install.sh
 systemctl is-active control-server.service
 curl -fsS http://localhost:8443/health
@@ -115,10 +119,9 @@ curl -fsS http://localhost:8443/health
 
 支持 Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Fedora。脚本会自动安装 Node、创建系统用户、编译代码、生成随机密钥、安装并启动 systemd 服务、放行防火墙端口。
 
-部署脚本会校验并复制 `artifacts/windows` 与 `deploy/windows`，因此 Linux 服务端安装完成后会同时提供 `irm http://SERVER:PORT/nacho.ps1 | iex`。发布服务端前应先运行 `server/client/deploy/publish.ps1` 生成并校验 Windows Agent 制品。
+部署脚本会校验并复制 `artifacts/windows` 与 `deploy/windows`，因此 Linux 服务端安装完成后会同时提供 `irm http://SERVER:PORT/nacho.ps1 | iex`。发布服务端前应先运行 `client/deploy/publish.ps1` 生成并校验 Windows Agent 制品（该制品约 72 MB，不入库，需在本机生成）。
 
 ```bash
-cd server
 sudo ./deploy/install.sh
 ```
 
@@ -151,7 +154,7 @@ napl uninstall purge                # 确认后彻底删除
 
 安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
 
-`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存到 `/var/backups/control-server`，保留最近 10 份。配置变更会先显示预览并在重启或健康检查失败时自动恢复。Panel API Key 与 Enrollment Key 分开轮换，设备 token 不变。在线升级只读取公开仓库 `nachomao/nacho-main` 的稳定 Release，并使用 Ed25519 签名和 manifest SHA-256 校验；没有合格 Release 时显示“暂无可用在线版本”。
+`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存到 `/var/backups/control-server`，保留最近 10 份。配置变更会先显示预览并在重启或健康检查失败时自动恢复。Panel API Key 与 Enrollment Key 分开轮换，设备 token 不变。在线升级只读取公开仓库 `nachomao/nacho-server` 的稳定 Release，并使用 Ed25519 签名和 manifest SHA-256 校验；没有合格 Release 时显示“暂无可用在线版本”。可用 `NAPL_GITHUB_REPO` 临时覆盖该仓库地址。
 
 ---
 

@@ -10,3 +10,12 @@ data/
 .env.local
 tmp-*.db*
 tmp-script-check/
+
+# 发布制品不入库：Windows Agent 单文件约 72 MB，由 client/deploy/publish.ps1
+# 在本机生成，Linux 发布包由 deploy/build-release.mjs 制作后上传到 GitHub Release。
+# 只保留 latest.json 与 .gitkeep 记录制品目录结构。
+artifacts/windows/*.exe
+artifacts/releases/
+
+# 临时验收证据（截图、patch、回滚脚本），仅供追溯，不属于源码。
+artifacts/evidence/

@@ -15,14 +15,14 @@ Windows 客户端负责设备注册、DPAPI 设备令牌持久化、心跳与指
 ## 构建与测试
 
 ```powershell
-dotnet build server/client/src/Nacho.Agent/Nacho.Agent.csproj
-dotnet test server/client/tests/Nacho.Agent.Tests/Nacho.Agent.Tests.csproj
-powershell -ExecutionPolicy Bypass -File server/client/deploy/publish.ps1
+dotnet build client/src/Nacho.Agent/Nacho.Agent.csproj
+dotnet test client/tests/Nacho.Agent.Tests/Nacho.Agent.Tests.csproj
+powershell -ExecutionPolicy Bypass -File client/deploy/publish.ps1
 ```
 
-发布脚本将单文件制品和 `latest.json` 写入 `server/artifacts/windows`，服务端随后通过公共下载路由提供这些文件。
+发布脚本将单文件制品和 `latest.json` 写入 `artifacts/windows`，服务端随后通过公共下载路由提供这些文件。制品约 72 MB，不入库，需在本机生成。
 
-当服务端从 WSL 部署副本（例如 `/opt/control-server`）运行时，发布后必须先把 `server/artifacts/windows` 中的新可执行文件与 `latest.json` 同步到该部署副本配置的 `ARTIFACTS_PATH/windows`，保持服务账户可读，再执行覆盖安装；验收前应比较下载清单、已安装文件和本地发布文件的 SHA-256，避免旧制品仍被下载。
+当服务端从 WSL 部署副本（例如 `/opt/control-server`）运行时，发布后必须先把 `artifacts/windows` 中的新可执行文件与 `latest.json` 同步到该部署副本配置的 `ARTIFACTS_PATH/windows`，保持服务账户可读，再执行覆盖安装；验收前应比较下载清单、已安装文件和本地发布文件的 SHA-256，避免旧制品仍被下载。
 
 ## 服务端配置
 
@@ -218,7 +218,7 @@ Agent 1.1.20 起，桌面进程行右键菜单和移动端 `…` 菜单提供：
 
 新安装生成的 `%ProgramData%\Nacho\agent.json` 包含 `"allowedProcessPaths": []`。管理员应写入允许终止的完整映像路径并重启 `NachoAgent`；覆盖升级只更新 `serverUrl`，保留该允许列表和其他管理员配置。
 
-自动化与真实验收使用 `server/client/tests/Nacho.Agent.TestProcess` 生成的无副作用等待进程及其子进程。测试必须记录 PID 和真实映像路径，并确认单进程模式、进程树模式以及无关同名实例隔离，禁止选择系统关键进程、面板服务端或 `NachoAgent`。
+自动化与真实验收使用 `client/tests/Nacho.Agent.TestProcess` 生成的无副作用等待进程及其子进程。测试必须记录 PID 和真实映像路径，并确认单进程模式、进程树模式以及无关同名实例隔离，禁止选择系统关键进程、面板服务端或 `NachoAgent`。
 
 ## `restart-system` 契约
 

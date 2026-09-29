@@ -15,7 +15,7 @@ DATA_DIR="${NAPL_DATA_DIR:-${DATA_DIR:-/var/lib/${APP_NAME}}}"
 BACKUP_DIR="${NAPL_BACKUP_DIR:-/var/backups/${APP_NAME}}"
 SERVICE_NAME="${NAPL_SERVICE_NAME:-${APP_NAME}.service}"
 ENTRYPOINT="${NAPL_ENTRYPOINT:-/usr/local/bin/napl}"
-REPO="${NAPL_GITHUB_REPO:-nachomao/nacho-main}"
+REPO="${NAPL_GITHUB_REPO:-nachomao/nacho-server}"
 RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
 PUBLIC_KEY="${NAPL_RELEASE_PUBLIC_KEY:-${INSTALL_DIR}/deploy/napl-release-public.pem}"
 MAX_BACKUPS=10
@@ -504,9 +504,13 @@ download_release() {
 latest_release_asset() {
   local metadata="$1"
   [ -s "$metadata" ] || return 1
-  node - "$metadata" <<'NODE'
+  node - "$metadata" "$REPO" <<'NODE'
 const fs = require("node:fs");
 const data = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+// 下载来源白名单跟随 REPO，避免 API 响应把升级包指向其他主机。
+const repo = process.argv[3];
+if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo || "")) process.exit(1);
+const prefix = new RegExp("^https://github\\.com/" + repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/releases/download/");
 if (!data || data.draft || data.prerelease || !Array.isArray(data.assets)) process.exit(1);
 const asset = data.assets.find((item) => /^control-server-\d+\.\d+\.\d+-linux-x64\.tar\.gz$/.test(item.name));
 const sig = data.assets.find((item) => item.name === "manifest.sig");
@@ -514,7 +518,7 @@ const manifest = data.assets.find((item) => item.name === "manifest.json");
 if (!asset || !sig || !manifest) process.exit(1);
 if (data.tag_name !== "v" + asset.name.match(/^control-server-(.*)-linux-x64\.tar\.gz$/)[1]) process.exit(1);
 for (const item of [asset, sig, manifest]) {
-  if (typeof item.browser_download_url !== "string" || !/^https:\/\/github\.com\/nachomao\/nacho-main\/releases\/download\//.test(item.browser_download_url)) process.exit(1);
+  if (typeof item.browser_download_url !== "string" || !prefix.test(item.browser_download_url)) process.exit(1);
 }
 process.stdout.write(JSON.stringify({ tag: data.tag_name || "", asset: asset.browser_download_url, sig: sig.browser_download_url, manifest: manifest.browser_download_url }));
 NODE

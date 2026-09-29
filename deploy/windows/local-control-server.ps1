@@ -31,14 +31,14 @@ $FirewallPrefix = "NachoPanel-Local-Control-"
 
 function Assert-TrustedProject {
     $ManifestPath = Join-Path $ServerDir "package.json"
-    if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "缺少 server/package.json" }
+    if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "缺少服务端 package.json" }
     if (-not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) { throw "缺少 Windows 本地服务启动器" }
     $Manifest = [System.IO.File]::ReadAllText($ManifestPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     if ($Manifest.name -ne "nacho-server") { throw "目标目录不是 Nacho 服务端项目" }
 }
 
 function Import-ManagedEnvironment {
-    if (-not (Test-Path -LiteralPath $EnvironmentPath -PathType Leaf)) { throw "缺少 server/.env" }
+    if (-not (Test-Path -LiteralPath $EnvironmentPath -PathType Leaf)) { throw "缺少服务端 .env" }
     foreach ($Line in [System.IO.File]::ReadAllLines($EnvironmentPath, [System.Text.Encoding]::UTF8)) {
         if ($Line -match '^(?<key>[A-Za-z_][A-Za-z0-9_]*)=(?<value>.*)$') {
             [Environment]::SetEnvironmentVariable($Matches.key, $Matches.value, "Process")

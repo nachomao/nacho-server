@@ -35,7 +35,7 @@ TRUST_PROXY="${TRUST_PROXY:-false}"
 PANEL_API_KEY="${PANEL_API_KEY:-}"
 ENROLLMENT_KEY="${ENROLLMENT_KEY:-}"
 
-# 脚本所在目录（server/deploy），其上级即 server 源码根目录
+# 脚本所在目录（deploy），其上级即源码根目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -125,7 +125,7 @@ verify_windows_artifact() {
   local manifest="${SOURCE_DIR}/artifacts/windows/latest.json"
   if [ ! -f "${manifest}" ]; then
     err "缺少 Windows Agent 清单：${manifest}"
-    err "请先在开发机运行 server/client/deploy/publish.ps1，并将 artifacts 随服务端一起发布。"
+    err "请先在开发机运行 client/deploy/publish.ps1，并将 artifacts 随服务端一起发布。"
     exit 1
   fi
 
@@ -230,7 +230,7 @@ install_service() {
   cat > "${unit}" <<EOF
 [Unit]
 Description=Control Server (面板服务端)
-Documentation=https://github.com/nachomao/nacho
+Documentation=https://github.com/nachomao/nacho-server
 After=network-online.target
 Wants=network-online.target
 

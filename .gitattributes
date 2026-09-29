@@ -1,0 +1,9 @@
+# 部署脚本必须保持 LF：云端部署会把它们上传到 Linux 后直接交给 bash strict mode，
+# CRLF 会导致 `set -euo pipefail` 之类的行无法解析。
+deploy/install.sh text eol=lf
+deploy/uninstall.sh text eol=lf
+deploy/napl text eol=lf
+
+# 以下文本按原样处理，避免换行符或编码转换改变 manifest / 密钥内容。
+deploy/napl-release-public.pem -text
+artifacts/windows/latest.json -text
