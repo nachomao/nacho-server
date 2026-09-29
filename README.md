@@ -12,6 +12,10 @@
 
 本仓库是**独立仓库**，只包含 Nacho 的服务端与 Windows Agent 源码，不包含面板前端（面板见 `nachomao/nacho-main`）。
 
+> 三个组件之间的依赖关系、数据流、凭据模型和**改动归属**见面板仓的
+> [ARCHITECTURE.md](https://github.com/nachomao/nacho-main/blob/main/ARCHITECTURE.md)。
+> 改命令契约时必须同时改 Agent、服务端 Zod schema 和面板解析器三处。
+
 - **面板** 只是前端 UI，不存任何业务数据，全部通过 `/api/panel/*` 读写服务端。
 - **服务端**（本仓库）负责：存储业务数据、管理客户端注册与在线状态、为面板提供 API、把任务/指令**下发**到客户端、接收并记录执行结果。
 - **客户端 Agent** 源码在本仓库的 `client/`（.NET 10），通过 `/agent/*` 注册、上报心跳与指标、拉取待执行指令、回报结果，并可用 WebSocket 保持长连接以实时接收下发。
