@@ -11,9 +11,12 @@ data/
 tmp-*.db*
 tmp-script-check/
 
-# 发布制品不入库：Windows Agent 单文件约 72 MB，由 client/deploy/publish.ps1
-# 在本机生成，Linux 发布包由 deploy/build-release.mjs 制作后上传到 GitHub Release。
-# 只保留 latest.json 与 .gitkeep 记录制品目录结构。
+# 发布制品：artifacts/windows 只保留 latest.json 指向的那一个当前版本 exe
+# （约 72 MB，由 client/deploy/publish.ps1 生成并在发布时自动清理旧版本）。
+# 这条规则拦住误提交的过期 exe；当前版本用 git add -f 纳入，
+# 并由 src/tests/agent-artifacts.test.ts 断言二者始终一致。
+# 历史版本由 GitHub Release 存档，不进仓库。
+# Linux 发布包由 deploy/build-release.mjs 制作后上传为 Release 资产，同样不入库。
 artifacts/windows/*.exe
 artifacts/releases/
 

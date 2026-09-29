@@ -18,6 +18,11 @@ try {
   if ($actualHash -ne $hash) { throw 'Published artifact hash verification failed.' }
   $manifest = @{ version = $version; fileName = $name; sha256 = $actualHash; rid = 'win-x64'; sizeBytes = $artifact.Length; publishedAt = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json
   [IO.File]::WriteAllText((Join-Path $ArtifactsPath 'latest.json'), $manifest, [Text.UTF8Encoding]::new($false))
+  # artifacts/windows 只保留当前版本：历史 exe 没有任何引用方，却会让仓库体积
+  # 随发布次数线性膨胀（旧版本由 GitHub Release 存档，不进仓库）。
+  Get-ChildItem -LiteralPath $ArtifactsPath -Filter 'nacho-agent-*-win-x64.exe' -File |
+    Where-Object { $_.Name -ne $name } |
+    Remove-Item -Force
   Write-Host "Published $name to $ArtifactsPath"
 }
 finally {
