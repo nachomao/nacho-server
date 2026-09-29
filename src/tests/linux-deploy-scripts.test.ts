@@ -28,6 +28,29 @@ test("Linux installer uses LF line endings so bash accepts strict mode after clo
   assert.match(install, /^set -euo pipefail\n/m)
 })
 
+// 逐个 .sh + 无扩展名的 napl 都要检查：只断言 install.sh 会漏掉新脚本，
+// 而 CRLF 的 bash 脚本在 Linux 上会直接报 "invalid option name"。
+test("every shell script in deploy/ is committed with LF line endings", () => {
+  const scripts = fs.readdirSync(deployDir, { recursive: true, encoding: "utf8" })
+    .filter((entry) => /\.sh$/.test(entry) || entry === "napl")
+    .map((entry) => path.join(deployDir, entry))
+  assert.ok(scripts.length >= 4, `期望至少检查 4 个脚本，实际 ${scripts.length}`)
+  for (const script of scripts) {
+    const content = fs.readFileSync(script, "utf8")
+    assert.doesNotMatch(content, /\r/, `${path.relative(repoDir, script)} 含 CRLF，bash 无法在 Linux 上解析`)
+    assert.match(content, /^#!\/usr\/bin\/env bash\n/, `${path.relative(repoDir, script)} 缺少 bash shebang`)
+  }
+})
+
+test("gitattributes forces LF for all shell scripts instead of naming them one by one", () => {
+  const attributes = fs.readFileSync(path.join(repoDir, ".gitattributes"), "utf8")
+  assert.match(attributes, /^\*\.sh text eol=lf$/m)
+  assert.match(attributes, /^deploy\/napl text eol=lf$/m)
+  // 公钥与清单必须字节级保留，不能被行尾转换改写。
+  assert.match(attributes, /^deploy\/napl-release-public\.pem -text$/m)
+  assert.match(attributes, /^artifacts\/windows\/latest\.json -text$/m)
+})
+
 test("Linux uninstall only removes the entrypoint owned by this installation", () => {
   assert.match(uninstall, /readlink -f/)
   assert.match(uninstall, /\/usr\/local\/bin\/napl/)
