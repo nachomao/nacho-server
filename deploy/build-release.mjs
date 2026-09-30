@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { execFileSync } from "node:child_process"
@@ -32,6 +32,7 @@ execFileSync(npm, ["run", "build"], { cwd: serverDir, stdio: "inherit" })
 for (const item of ["dist", "package.json", "package-lock.json", "deploy"]) {
   await cp(join(serverDir, item), join(payload, item), { recursive: true })
 }
+await chmod(join(payload, "deploy", "napl"), 0o755)
 execFileSync(npm, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: payload, stdio: "inherit" })
 await rm(join(payload, "node_modules", ".bin"), { recursive: true, force: true })
 

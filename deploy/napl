@@ -637,7 +637,10 @@ NODE
     for item in dist node_modules package.json package-lock.json deploy; do
       [ -e "$temp/release/$item" ] && cp -a "$temp/release/$item" "$INSTALL_DIR/$item"
     done
-    [ -x "$INSTALL_DIR/deploy/napl" ] && ln -sfn "$INSTALL_DIR/deploy/napl" "$ENTRYPOINT"
+    if [ -f "$INSTALL_DIR/deploy/napl" ]; then
+      chmod 755 "$INSTALL_DIR/deploy/napl"
+      ln -sfn "$INSTALL_DIR/deploy/napl" "$ENTRYPOINT"
+    fi
   }; then
     rm -rf "$INSTALL_DIR/dist" "$INSTALL_DIR/node_modules" "$INSTALL_DIR/deploy"
     for item in dist node_modules package.json package-lock.json deploy; do

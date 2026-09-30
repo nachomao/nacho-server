@@ -92,6 +92,11 @@ test("Linux updater is root-owned and restores the pre-upgrade database after an
   assert.match(napl, /restore_upgrade_database "\$current"/)
 })
 
+test("Linux 发布包与在线安装器均确保 napl 可执行", () => {
+  assert.match(release, /chmod\(join\(payload, "deploy", "napl"\), 0o755\)/)
+  assert.match(napl, /chmod 755 "\$INSTALL_DIR\/deploy\/napl"/)
+})
+
 // GitHub 仅是源码来源，签名更新下载不再依赖 GitHub Release。
 const REPO_SLUG = "nachomao/nacho-server"
 
