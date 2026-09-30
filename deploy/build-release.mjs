@@ -29,7 +29,7 @@ if (process.platform !== "linux" || process.arch !== "x64") {
 const npm = "npm"
 execFileSync(npm, ["ci", "--no-audit", "--no-fund"], { cwd: serverDir, stdio: "inherit" })
 execFileSync(npm, ["run", "build"], { cwd: serverDir, stdio: "inherit" })
-for (const item of ["dist", "package.json", "package-lock.json", "deploy", "artifacts/windows"]) {
+for (const item of ["dist", "package.json", "package-lock.json", "deploy"]) {
   await cp(join(serverDir, item), join(payload, item), { recursive: true })
 }
 execFileSync(npm, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: payload, stdio: "inherit" })
@@ -55,10 +55,16 @@ files.sort((a, b) => a.path.localeCompare(b.path))
 const manifest = JSON.stringify({ format: 1, version, platform: "linux-x64", files }, null, 2) + "\n"
 await writeFile(join(releaseRoot, "manifest.json"), manifest, { mode: 0o600 })
 execFileSync("openssl", ["pkeyutl", "-sign", "-rawin", "-inkey", resolve(privateKey), "-in", join(releaseRoot, "manifest.json"), "-out", join(releaseRoot, "manifest.sig")], { stdio: "inherit" })
+execFileSync("openssl", [
+  "pkeyutl", "-verify", "-pubin", "-rawin",
+  "-inkey", join(serverDir, "deploy", "napl-release-public.pem"),
+  "-in", join(releaseRoot, "manifest.json"),
+  "-sigfile", join(releaseRoot, "manifest.sig"),
+], { stdio: "inherit" })
 await cp(payload, releaseRoot, { recursive: true })
 await mkdir(output, { recursive: true })
 const archive = join(output, `control-server-${version}-linux-x64.tar.gz`)
-execFileSync("tar", ["-czf", archive, "-C", releaseRoot, "manifest.json", "manifest.sig", "dist", "node_modules", "package.json", "package-lock.json", "deploy", "artifacts"], { stdio: "inherit" })
+execFileSync("tar", ["-czf", archive, "-C", releaseRoot, "manifest.json", "manifest.sig", "dist", "node_modules", "package.json", "package-lock.json", "deploy"], { stdio: "inherit" })
 await cp(join(releaseRoot, "manifest.json"), join(output, "manifest.json"))
 await cp(join(releaseRoot, "manifest.sig"), join(output, "manifest.sig"))
 console.log(JSON.stringify({ version, archive, manifest: join(output, "manifest.json"), signature: join(output, "manifest.sig") }, null, 2))

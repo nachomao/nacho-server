@@ -88,6 +88,7 @@ assert_noninteractive_failure() {
 }
 
 run_napl status >/dev/null
+assert_status 6 update check
 assert_noninteractive_failure config </dev/null
 assert_noninteractive_failure unknown-command </dev/null
 

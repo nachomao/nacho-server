@@ -55,6 +55,8 @@ test("Linux uninstall only removes the entrypoint owned by this installation", (
   assert.match(uninstall, /readlink -f/)
   assert.match(uninstall, /\/usr\/local\/bin\/napl/)
   assert.match(uninstall, /rm -f "\$\{entry\}"/)
+  assert.match(uninstall, /systemctl disable --now control-server-updater\.path/)
+  assert.match(napl, /systemctl disable --now control-server-updater\.path/)
 })
 
 test("napl exposes the documented non-interactive command surface", () => {
@@ -76,27 +78,36 @@ test("release builder creates the fixed Linux asset name and signs the manifest"
   assert.match(release, /manifest\.sig/)
   assert.match(release, /pkeyutl/)
   assert.match(release, /NAPL_RELEASE_SIGNING_KEY_FILE/)
+  assert.doesNotMatch(release, /artifacts\/windows/)
+  assert.doesNotMatch(install, /verify_windows_artifact/)
 })
 
-// 本仓库已从 nacho-main 拆分为独立的 nacho-server 仓库。发布地址在 napl 默认值、
-// systemd 单元和 package.json 三处必须一致，否则在线升级会静默失效。
+test("Linux updater is root-owned and restores the pre-upgrade database after an unhealthy start", () => {
+  assert.match(install, /control-server-updater\.path/)
+  assert.match(install, /install -m 755 -o root -g root/)
+  assert.match(install, /install -d -m 755 -o root -g root "\$\{DATA_DIR\}\/update-status"/)
+  const broker = fs.readFileSync(path.join(deployDir, "execute-update.mjs"), "utf8")
+  assert.match(broker, /update-status\/status\.json/)
+  assert.match(broker, /flag: "wx"/)
+  assert.match(napl, /restore_upgrade_database "\$current"/)
+})
+
+// GitHub 仅是源码来源，签名更新下载不再依赖 GitHub Release。
 const REPO_SLUG = "nachomao/nacho-server"
 
-test("release repository is consistent across napl, systemd unit and package.json", () => {
-  assert.match(napl, new RegExp(`REPO="\\$\\{NAPL_GITHUB_REPO:-${REPO_SLUG.replace("/", "\\/")}\\}"`))
+test("source repository identity remains correct while upgrade artifacts use the independent server", () => {
   assert.match(install, new RegExp(`Documentation=https://github\\.com/${REPO_SLUG.replace("/", "\\/")}`))
   assert.equal(manifest.repository?.url, `git+https://github.com/${REPO_SLUG}.git`)
+  assert.doesNotMatch(napl, /github\.com\/.*releases\/download/)
 })
 
-test("napl derives the download allowlist from REPO instead of hardcoding a host path", () => {
-  // 白名单必须跟随 REPO 变量，否则改了仓库地址后校验仍会拒绝合法下载。
-  assert.doesNotMatch(napl, /nacho-main/)
-  assert.match(napl, /node - "\$metadata" "\$REPO" <<'NODE'/)
-  assert.match(napl, /const prefix = new RegExp\(/)
-  assert.match(napl, /repo\.replace\(/)
-  assert.match(napl, /prefix\.test\(item\.browser_download_url\)/)
-  // 仓库名仍需做形状校验，避免注入到正则与 API 地址中。
-  assert.match(napl, /if \(!\/\^\[A-Za-z0-9\._-\]\+\\\/\[A-Za-z0-9\._-\]\+\$\/\.test\(repo/)
+test("napl validates the signed independent update server index and immutable asset URL", () => {
+  assert.match(napl, /RELEASE_INDEX_URL/)
+  assert.match(napl, /openssl pkeyutl -verify/)
+  assert.match(napl, /UPDATE_CHANNEL/)
+  assert.match(napl, /schemaVersion !== 2/)
+  assert.match(napl, /artifacts\/server/)
+  assert.match(napl, /crypto\.createHash\("sha256"\)/)
 })
 
 test("server project identity stays nacho-server for the Windows local launcher", () => {

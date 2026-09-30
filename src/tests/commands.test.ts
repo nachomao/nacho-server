@@ -15,6 +15,8 @@ let clients: typeof import("../services/clients")
 let commands: typeof import("../services/commands")
 let canEnroll: typeof import("../lib/auth").canEnroll
 let agentUpdates: typeof import("../services/agent-updates")
+let agentArtifactSync: typeof import("../services/agent-release-sync")
+let productUpdates: typeof import("../services/product-updates")
 let agentRouter: typeof import("../routes/agent").agentRouter
 let logs: typeof import("../services/logs")
 let settings: typeof import("../services/settings")
@@ -68,6 +70,8 @@ before(async () => {
   settings = await import("../services/settings")
   enrollmentGuard = await import("../services/enrollment-guard")
   agentUpdates = await import("../services/agent-updates")
+  agentArtifactSync = await import("../services/agent-release-sync")
+  productUpdates = await import("../services/product-updates")
   initSchema()
 })
 
@@ -333,6 +337,68 @@ test("release reader rejects an artifact hash mismatch", () => {
   fs.writeFileSync(artifact, "corrupt")
   assert.throws(() => agentUpdates.readAgentRelease(), /size does not match|sha256 does not match/)
   fs.writeFileSync(artifact, original)
+})
+
+test("仅对声明了最低面板版本的写操作返回升级要求", () => {
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/channel", "0.1.3"), "0.1.4")
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/channel", "0.1.4"), null)
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", undefined), "0.1.4")
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", "0.1.3"), "0.1.4")
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", "0.1.4"), null)
+  assert.equal(productUpdates.operationCompatibility("GET", "/runtime-info", undefined), null)
+  assert.equal(productUpdates.operationCompatibility("POST", "/tasks", undefined), null)
+  assert.equal(productUpdates.operationCompatibility("POST", "/agent-updates", "0.1.0"), null)
+})
+
+test("版本能力 API 可供旧面板查询，只有不兼容的升级写操作返回 426", async () => {
+  const { panelRouter } = await import("../routes/panel")
+  const { config } = await import("../config")
+  const app = express()
+  app.use(express.json())
+  app.use("/api/panel", panelRouter)
+  const server = app.listen(0, "127.0.0.1")
+  await new Promise<void>((resolve) => server.once("listening", resolve))
+  try {
+    const address = server.address()
+    assert.ok(address && typeof address !== "string")
+    const base = `http://127.0.0.1:${address.port}/api/panel`
+    const authorization = { Authorization: `Bearer ${config.panelApiKey}` }
+    const runtime = await fetch(`${base}/runtime-info`, { headers: authorization })
+    assert.equal(runtime.status, 200)
+    const body = await runtime.json() as { data: { version: string; minPanelVersion: string } }
+    assert.equal(body.data.version, "1.0.2")
+    assert.equal(body.data.minPanelVersion, "0.1.4")
+    const oldPanel = await fetch(`${base}/product-updates/server`, {
+      method: "POST", headers: { ...authorization, "content-type": "application/json", "x-nacho-panel-version": "0.1.1" },
+      body: JSON.stringify({ version: "1.0.1", panelVersion: "0.1.1" }),
+    })
+    assert.equal(oldPanel.status, 426)
+    const incompatible = await oldPanel.json() as { minPanelVersion: string }
+    assert.equal(incompatible.minPanelVersion, "0.1.4")
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+})
+
+test("离线待执行 Agent 更新保持所引用的旧版制品，终态后再清理", () => {
+  db.exec("DELETE FROM commands; DELETE FROM clients")
+  const { client } = clients.registerClient({ name: "offline-agent-artifact", os: "Windows", version: "1.0.0" })
+  const oldFile = "nacho-agent-1.0.0-win-x64.exe"
+  const oldPath = path.join(artifactsPath, "windows", oldFile)
+  fs.writeFileSync(oldPath, "old-release")
+  const command = commands.dispatchCommand({
+    clientId: client.id, type: "update-agent",
+    payload: { targetVersion: "1.0.0", fileName: oldFile, sha256: "a".repeat(64), sizeBytes: 11 },
+  })
+  try {
+    agentArtifactSync.pruneUnusedAgentArtifacts()
+    assert.equal(fs.existsSync(oldPath), true)
+    db.prepare("UPDATE commands SET status='success' WHERE id=?").run(command.id)
+    agentArtifactSync.pruneUnusedAgentArtifacts()
+    assert.equal(fs.existsSync(oldPath), false)
+  } finally {
+    fs.rmSync(oldPath, { force: true })
+  }
 })
 
 test("pending command remains deliverable until client acknowledgement", () => {

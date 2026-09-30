@@ -15,8 +15,14 @@ DATA_DIR="${NAPL_DATA_DIR:-${DATA_DIR:-/var/lib/${APP_NAME}}}"
 BACKUP_DIR="${NAPL_BACKUP_DIR:-/var/backups/${APP_NAME}}"
 SERVICE_NAME="${NAPL_SERVICE_NAME:-${APP_NAME}.service}"
 ENTRYPOINT="${NAPL_ENTRYPOINT:-/usr/local/bin/napl}"
-REPO="${NAPL_GITHUB_REPO:-nachomao/nacho-server}"
-RELEASE_API="https://api.github.com/repos/${REPO}/releases/latest"
+UPDATE_ORIGIN="${NACHO_UPDATE_ORIGIN:-https://updates.example.invalid}"
+UPDATE_CHANNEL="${NACHO_UPDATE_CHANNEL:-}"
+if [ -z "$UPDATE_CHANNEL" ] && [ -f "$DATA_DIR/update-channel.json" ]; then
+  UPDATE_CHANNEL="$(node -e 'try{const c=require(process.argv[1]).channel;if(["stable","beta","alpha"].includes(c))process.stdout.write(c)}catch{}' "$DATA_DIR/update-channel.json")"
+fi
+UPDATE_CHANNEL="${UPDATE_CHANNEL:-stable}"
+case "$UPDATE_CHANNEL" in stable|beta|alpha) ;; *) echo "无效更新频道" >&2; exit 2;; esac
+RELEASE_INDEX_URL="${NAPL_RELEASE_INDEX_URL:-${UPDATE_ORIGIN}/updates/${UPDATE_CHANNEL}/index.json}"
 PUBLIC_KEY="${NAPL_RELEASE_PUBLIC_KEY:-${INSTALL_DIR}/deploy/napl-release-public.pem}"
 MAX_BACKUPS=10
 
@@ -504,24 +510,31 @@ download_release() {
 latest_release_asset() {
   local metadata="$1"
   [ -s "$metadata" ] || return 1
-  node - "$metadata" "$REPO" <<'NODE'
+  UPDATE_ORIGIN="$UPDATE_ORIGIN" UPDATE_CHANNEL="$UPDATE_CHANNEL" node - "$metadata" <<'NODE'
 const fs = require("node:fs");
 const data = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-// 下载来源白名单跟随 REPO，避免 API 响应把升级包指向其他主机。
-const repo = process.argv[3];
-if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo || "")) process.exit(1);
-const prefix = new RegExp("^https://github\\.com/" + repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/releases/download/");
-if (!data || data.draft || data.prerelease || !Array.isArray(data.assets)) process.exit(1);
-const asset = data.assets.find((item) => /^control-server-\d+\.\d+\.\d+-linux-x64\.tar\.gz$/.test(item.name));
-const sig = data.assets.find((item) => item.name === "manifest.sig");
-const manifest = data.assets.find((item) => item.name === "manifest.json");
-if (!asset || !sig || !manifest) process.exit(1);
-if (data.tag_name !== "v" + asset.name.match(/^control-server-(.*)-linux-x64\.tar\.gz$/)[1]) process.exit(1);
-for (const item of [asset, sig, manifest]) {
-  if (typeof item.browser_download_url !== "string" || !prefix.test(item.browser_download_url)) process.exit(1);
-}
-process.stdout.write(JSON.stringify({ tag: data.tag_name || "", asset: asset.browser_download_url, sig: sig.browser_download_url, manifest: manifest.browser_download_url }));
+const origin = process.env.UPDATE_ORIGIN;
+const release = data?.releases?.server;
+if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(origin) ||
+    data?.schemaVersion !== 2 || data?.channel !== process.env.UPDATE_CHANNEL ||
+    !Number.isSafeInteger(data.sequence) || !release ||
+    !/^\d+\.\d+\.\d+$/.test(release.version) ||
+    !/^[a-f0-9]{64}$/.test(release.sha256) ||
+    !Number.isSafeInteger(release.sizeBytes) || release.sizeBytes < 1 ||
+    release.fileName !== `control-server-${release.version}-linux-x64.tar.gz`) process.exit(1);
+if (release.url !== `${origin}/artifacts/server/${release.version}/${release.sha256}/${release.fileName}`) process.exit(1);
+process.stdout.write(JSON.stringify({
+  version: release.version, asset: release.url, sha256: release.sha256, sizeBytes: release.sizeBytes,
+}));
 NODE
+}
+
+download_signed_index() {
+  local metadata="$1"
+  download_release "$RELEASE_INDEX_URL" "$metadata" || return 1
+  download_release "${RELEASE_INDEX_URL}.sig" "${metadata}.sig" || return 1
+  [ -f "$PUBLIC_KEY" ] || return 1
+  openssl pkeyutl -verify -pubin -inkey "$PUBLIC_KEY" -sigfile "${metadata}.sig" -in "$metadata" -rawin >/dev/null 2>&1
 }
 
 verify_release_manifest() {
@@ -553,10 +566,7 @@ update_check() {
   temp="$(mktemp -d)"
   trap 'rm -rf "${temp:-}"' RETURN
   metadata="$temp/latest.json"
-  if ! download_release "$RELEASE_API" "$metadata" 2>/dev/null; then
-    log "暂无可用在线版本。"
-    return 0
-  fi
+  download_signed_index "$metadata" || die "$EXIT_INTEGRITY" "在线发布索引不可用或签名无效。"
   if ! info="$(latest_release_asset "$metadata" 2>/dev/null)"; then
     log "暂无可用在线版本。"
     return 0
@@ -564,8 +574,26 @@ update_check() {
   printf '%s\n' "$info"
 }
 
+restore_upgrade_database() {
+  local archive="$1" stage db
+  stage="$(mktemp -d)"
+  tar -xzf "$archive" -C "$stage" payload/database || { rm -rf "$stage"; return 1; }
+  db="$(resolve_config_path "$(env_get DATABASE_PATH)" "${DATA_DIR}/control.db")"
+  if [ -f "$stage/payload/database/control.db" ]; then
+    mkdir -p "$(dirname "$db")"
+    cp -a "$stage/payload/database/control.db" "${db}.upgrade-restore"
+    mv -f "${db}.upgrade-restore" "$db"
+    for suffix in -wal -shm; do
+      rm -f "${db}${suffix}"
+      [ -f "$stage/payload/database/control.db${suffix}" ] &&
+        cp -a "$stage/payload/database/control.db${suffix}" "${db}${suffix}"
+    done
+  fi
+  rm -rf "$stage"
+}
+
 install_release() {
-  local package="${1:-}" temp metadata info url sig_url manifest_url stage archive was_active=0 was_enabled=0 current backup old_dir
+  local package="${1:-}" temp metadata info url stage archive was_active=0 was_enabled=0 current backup old_dir
   temp="$(mktemp -d)"
   trap 'rm -rf "${temp:-}"' RETURN
   if [ -n "$package" ]; then
@@ -577,16 +605,22 @@ install_release() {
     tar -xzf "$archive" -C "$temp/release" || die "$EXIT_INTEGRITY" "本地升级包解包失败。"
   else
     metadata="$temp/latest.json"
-    download_release "$RELEASE_API" "$metadata" || die "$EXIT_INTEGRITY" "在线版本查询失败。"
+    download_signed_index "$metadata" || die "$EXIT_INTEGRITY" "在线发布索引不可用或签名无效。"
     info="$(latest_release_asset "$metadata" 2>/dev/null)" || die "$EXIT_INTEGRITY" "暂无可用在线版本。"
     url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.asset)' "$info")"
-    sig_url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.sig)' "$info")"
-    manifest_url="$(node -e 'const x=JSON.parse(process.argv[1]);process.stdout.write(x.manifest)' "$info")"
     download_release "$url" "$temp/package.tar.gz" || die "$EXIT_INTEGRITY" "升级包下载中断。"
+    node - "$temp/package.tar.gz" "$info" <<'NODE' || die "$EXIT_INTEGRITY" "升级包哈希或大小不匹配。"
+const fs=require("node:fs"), crypto=require("node:crypto");
+const [file,metadata]=process.argv.slice(2), info=JSON.parse(metadata);
+if (fs.statSync(file).size!==info.sizeBytes) process.exit(1);
+const hash=crypto.createHash("sha256");
+const fd=fs.openSync(file,"r"), buffer=Buffer.allocUnsafe(1024*1024);
+try { let n; while((n=fs.readSync(fd,buffer,0,buffer.length,null))>0) hash.update(buffer.subarray(0,n)); }
+finally { fs.closeSync(fd); }
+if(hash.digest("hex")!==info.sha256) process.exit(1);
+NODE
     mkdir -p "$temp/release"
     tar -xzf "$temp/package.tar.gz" -C "$temp/release" || die "$EXIT_INTEGRITY" "在线升级包解包失败。"
-    download_release "$sig_url" "$temp/release/manifest.sig" || die "$EXIT_INTEGRITY" "签名下载失败。"
-    download_release "$manifest_url" "$temp/release/manifest.json" || die "$EXIT_INTEGRITY" "清单下载失败。"
   fi
   verify_release_manifest "$temp/release" || die "$EXIT_INTEGRITY" "升级包签名或文件哈希校验失败。"
   [ -d "$temp/release/dist" ] || die "$EXIT_INTEGRITY" "升级包缺少 dist。"
@@ -618,6 +652,8 @@ install_release() {
     for item in dist node_modules package.json package-lock.json deploy; do
       [ -e "$old_dir/$item" ] && mv "$old_dir/$item" "$INSTALL_DIR/$item"
     done
+    restore_upgrade_database "$current" ||
+      die "$EXIT_ROLLBACK" "服务端代码已恢复，但升级前数据库还原失败；备份：$current"
     if ! systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || ! wait_for_health; then
       die "$EXIT_ROLLBACK" "升级健康检查失败，旧版本已恢复但服务恢复失败；当前状态备份：$current"
     fi
@@ -643,6 +679,13 @@ uninstall_command() {
   fi
   systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+  if [ "$SERVICE_NAME" = "control-server.service" ] && [ "$DATA_DIR" = "/var/lib/control-server" ] &&
+     [ -f /etc/systemd/system/control-server-updater.path ]; then
+    systemctl disable --now control-server-updater.path >/dev/null 2>&1 || true
+    systemctl stop control-server-updater.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/control-server-updater.path /etc/systemd/system/control-server-updater.service
+    rm -rf /usr/local/lib/nacho-updater
+  fi
   rm -f "/etc/systemd/system/${SERVICE_NAME}"
   systemctl daemon-reload >/dev/null 2>&1 || true
   if [ -L "$ENTRYPOINT" ] && [ "$(readlink -f "$ENTRYPOINT" 2>/dev/null || true)" = "$INSTALL_DIR/deploy/napl" ]; then

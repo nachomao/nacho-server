@@ -123,7 +123,7 @@ curl -fsS http://localhost:8443/health
 
 支持 Ubuntu / Debian / CentOS / RHEL / Rocky / AlmaLinux / Fedora。脚本会自动安装 Node、创建系统用户、编译代码、生成随机密钥、安装并启动 systemd 服务、放行防火墙端口。
 
-部署脚本会校验并复制 `artifacts/windows` 与 `deploy/windows`，因此 Linux 服务端安装完成后会同时提供 `irm http://SERVER:PORT/nacho.ps1 | iex`。发布服务端前应先运行 `client/deploy/publish.ps1` 生成并校验 Windows Agent 制品（该制品约 72 MB，不入库，需在本机生成）。
+服务端和 Agent 独立发布：安装服务端不再要求预先打包 Windows Agent EXE。服务端定期从签名发布索引准备 Agent 制品；制品准备成功后才提供对应的客户端下载，向已安装设备下发升级仍需管理员在面板手动确认。安装脚本 `nacho.ps1` 可在服务端制品就绪后使用。
 
 ```bash
 sudo ./deploy/install.sh
@@ -158,7 +158,7 @@ napl uninstall purge                # 确认后彻底删除
 
 安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
 
-`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存到 `/var/backups/control-server`，保留最近 10 份。配置变更会先显示预览并在重启或健康检查失败时自动恢复。Panel API Key 与 Enrollment Key 分开轮换，设备 token 不变。在线升级只读取公开仓库 `nachomao/nacho-server` 的稳定 Release，并使用 Ed25519 签名和 manifest SHA-256 校验；没有合格 Release 时显示“暂无可用在线版本”。可用 `NAPL_GITHUB_REPO` 临时覆盖该仓库地址。
+`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存到 `/var/backups/control-server`，保留最近 10 份。配置变更会先显示预览并在重启或健康检查失败时自动恢复。Panel API Key 与 Enrollment Key 分开轮换，设备 token 不变。在线升级从独立更新服务器 `NACHO_UPDATE_ORIGIN` 获取 Ed25519 签名的三组件频道索引；服务端制品仍有独立签名及 manifest SHA-256 校验。默认 Linux 安装会安装 root 拥有的 `control-server-updater.path/.service` 执行器；控制进程只能提交固定版本请求，不能执行任意 root 命令。`napl update check/install` 仍可独立使用。
 
 ---
 

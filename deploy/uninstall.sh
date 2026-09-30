@@ -20,6 +20,15 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+if [ "${APP_NAME}" = "control-server" ] && [ "${DATA_DIR}" = "/var/lib/control-server" ] &&
+   [ -f /etc/systemd/system/control-server-updater.path ]; then
+  systemctl disable --now control-server-updater.path >/dev/null 2>&1 || true
+  systemctl stop control-server-updater.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/control-server-updater.path /etc/systemd/system/control-server-updater.service
+  rm -rf /usr/local/lib/nacho-updater
+  systemctl daemon-reload
+fi
+
 if systemctl list-unit-files 2>/dev/null | grep -q "^${APP_NAME}.service"; then
   log "停止并禁用服务 ${APP_NAME}"
   systemctl stop "${APP_NAME}.service" || true

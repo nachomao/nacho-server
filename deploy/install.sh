@@ -121,33 +121,6 @@ install_node() {
   log "Node.js 就绪：$(node -v)"
 }
 
-verify_windows_artifact() {
-  local manifest="${SOURCE_DIR}/artifacts/windows/latest.json"
-  if [ ! -f "${manifest}" ]; then
-    err "缺少 Windows Agent 清单：${manifest}"
-    err "请先在开发机运行 client/deploy/publish.ps1，并将 artifacts 随服务端一起发布。"
-    exit 1
-  fi
-
-  local file_name expected_hash artifact actual_hash
-  file_name="$(node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(m.fileName || "")' "${manifest}")"
-  expected_hash="$(node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write((m.sha256 || "").toLowerCase())' "${manifest}")"
-  case "${file_name}" in
-    ""|*/*|*\\*) err "Windows Agent 清单中的文件名无效。"; exit 1 ;;
-  esac
-  artifact="${SOURCE_DIR}/artifacts/windows/${file_name}"
-  if [ ! -f "${artifact}" ]; then
-    err "缺少 Windows Agent 制品：${artifact}"
-    exit 1
-  fi
-  actual_hash="$(sha256sum "${artifact}" | awk '{print tolower($1)}')"
-  if [ -z "${expected_hash}" ] || [ "${actual_hash}" != "${expected_hash}" ]; then
-    err "Windows Agent 制品 SHA-256 校验失败。"
-    exit 1
-  fi
-  log "Windows Agent 制品已就绪：${file_name}"
-}
-
 # ---------------------------------------------------------------------------
 # 系统用户与目录
 # ---------------------------------------------------------------------------
@@ -167,11 +140,13 @@ deploy_code() {
   log "复制服务端代码到 ${INSTALL_DIR}"
   # 仅复制构建所需内容，排除 node_modules / data / .env / dist
   mkdir -p "${INSTALL_DIR}"
-  for item in package.json package-lock.json tsconfig.json src deploy artifacts; do
+  for item in package.json package-lock.json tsconfig.json src deploy; do
     if [ -e "${SOURCE_DIR}/${item}" ]; then
       cp -r "${SOURCE_DIR}/${item}" "${INSTALL_DIR}/"
     fi
   done
+  # Agent 制品独立发布；已有持久化制品保留，首次安装由服务端按签名索引拉取。
+  mkdir -p "${INSTALL_DIR}/artifacts/windows"
 
   cd "${INSTALL_DIR}"
 
@@ -268,8 +243,49 @@ EOF
   fi
   ln -sfn "${INSTALL_DIR}/deploy/napl" "${entry}"
 
+  # 升级代理始终从 root 拥有的副本运行；Node 服务仅能写入固定请求文件。
+  if [ "${APP_NAME}" = "control-server" ] && [ "${DATA_DIR}" = "/var/lib/control-server" ]; then
+    local broker="/usr/local/lib/nacho-updater"
+    install -d -m 755 -o root -g root "${broker}"
+    install -m 755 -o root -g root "${INSTALL_DIR}/deploy/execute-update.mjs" "${broker}/execute-update.mjs"
+    install -m 755 -o root -g root "${INSTALL_DIR}/deploy/napl" "${broker}/napl"
+    install -m 644 -o root -g root "${INSTALL_DIR}/deploy/napl-release-public.pem" "${broker}/release-public.pem"
+    install -d -m 700 -o "${APP_USER}" -g "${APP_USER}" "${DATA_DIR}/update-requests"
+    install -d -m 755 -o root -g root "${DATA_DIR}/update-status"
+    if [ -f "${DATA_DIR}/update-status/status.json" ]; then
+      chown root:root "${DATA_DIR}/update-status/status.json"
+      chmod 644 "${DATA_DIR}/update-status/status.json"
+    fi
+    cat > /etc/systemd/system/control-server-updater.service <<EOF
+[Unit]
+Description=Nacho signed control-server update executor
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-${INSTALL_DIR}/.env
+ExecStart=${node_bin} ${broker}/execute-update.mjs
+TimeoutStartSec=20min
+EOF
+    cat > /etc/systemd/system/control-server-updater.path <<EOF
+[Unit]
+Description=Nacho control-server update request
+
+[Path]
+PathExists=${DATA_DIR}/update-requests/request.json
+Unit=control-server-updater.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
+
   systemctl daemon-reload
   systemctl enable "${APP_NAME}.service"
+  if [ -f /etc/systemd/system/control-server-updater.path ]; then
+    systemctl enable --now control-server-updater.path
+  fi
   systemctl restart "${APP_NAME}.service"
 }
 
@@ -315,7 +331,6 @@ main() {
   require_root
   detect_os
   install_node
-  verify_windows_artifact
   setup_user_dirs
   deploy_code
   write_env

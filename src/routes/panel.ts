@@ -12,6 +12,7 @@ import * as settings from "../services/settings"
 import { isOpenEnrollmentEnabled } from "../lib/auth"
 import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
+import * as productUpdates from "../services/product-updates"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
 import * as managedArtifacts from "../services/managed-artifacts"
 import * as installProfiles from "../services/install-profiles"
@@ -22,6 +23,36 @@ export const panelRouter = Router()
 
 // 所有面板接口都需要面板 API Key
 panelRouter.use(panelAuth)
+panelRouter.use((req, res, next) => {
+  const required = productUpdates.operationCompatibility(req.method, req.path, req.header("x-nacho-panel-version"))
+  if (required) return fail(res, `此操作需要面板 ${required} 或更高版本`, 426, { minPanelVersion: required })
+  next()
+})
+
+// 保持这一查询接口向后兼容：旧面板可在升级前读取真实服务端能力。
+panelRouter.get("/runtime-info", asyncHandler((_req, res) => ok(res, productUpdates.runtimeInfo())))
+panelRouter.get("/product-updates", asyncHandler(async (_req, res) => {
+  try { return ok(res, await productUpdates.availableUpdates()) }
+  catch { return fail(res, "签名发布索引暂不可用", 503) }
+}))
+panelRouter.post("/product-updates/channel", asyncHandler(async (req, res) => {
+  const { channel } = parseBody(z.object({ channel: z.enum(["stable", "beta", "alpha"]) }).strict(), req.body)
+  try { return ok(res, await productUpdates.changeUpdateChannel(channel)) }
+  catch (error) { return fail(res, error instanceof Error ? error.message : "频道切换失败", 409) }
+}))
+panelRouter.post("/product-updates/server", asyncHandler(async (req, res) => {
+  const body = parseBody(z.object({
+    version: z.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/),
+    panelVersion: z.string().regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/),
+  }).strict(), req.body)
+  try { return ok(res, await productUpdates.requestServerUpdate(body.version, body.panelVersion), 202) }
+  catch (error) { return fail(res, error instanceof Error ? error.message : "无法创建升级请求", 409) }
+}))
+panelRouter.post("/product-updates/agent-artifact", asyncHandler(async (_req, res) =>
+  {
+    try { return ok(res, await productUpdates.syncAgentRelease(true), 202) }
+    catch (error) { return fail(res, error instanceof Error ? error.message : "Agent 制品准备失败", 503) }
+  }))
 
 /* ==================== 概览 ==================== */
 panelRouter.get(

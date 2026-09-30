@@ -10,6 +10,7 @@ import { agentRouter } from "./routes/agent"
 import { artifactRouter } from "./routes/artifacts"
 import { panelRouter } from "./routes/panel"
 import { recordLog } from "./services/logs"
+import { syncAgentRelease } from "./services/agent-release-sync"
 import { attachWebSocket } from "./ws"
 
 // 初始化数据库
@@ -86,6 +87,13 @@ server.listen(config.port, config.host, () => {
   logger.info(`Nacho 服务端已启动：http://${config.host}:${config.port}（${config.nodeEnv}）`)
   recordLog("info", "server", "服务端启动完成", `port=${config.port}`)
 })
+
+// 只准备受签名索引约束的制品；向设备下发仍由管理员手动确认。
+setTimeout(() => {
+  void syncAgentRelease().catch((error) => logger.warn("Agent 制品检查失败：", error))
+  setInterval(() => void syncAgentRelease().catch((error) =>
+    logger.warn("Agent 制品检查失败：", error)), 24 * 60 * 60 * 1000).unref()
+}, 5_000).unref()
 
 // 优雅退出
 let shuttingDown = false
