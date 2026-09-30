@@ -80,6 +80,8 @@ export function syncAgentRelease(force = false): Promise<{ version: string; upda
     const entry = index.releases.agent
     let current: string | null = null
     try { current = readAgentRelease().version } catch { /* 本地制品缺失或损坏时重新获取受信任版本 */ }
+    // 双仓 GitHub 发布仅在管理员从面板明确准备 Agent 制品时传输，不在启动时自动下载。
+    if (index.schemaVersion === 3 && !force) return { version: current || "", updated: false }
     if (current && compareReleaseVersions(entry.version, current) <= 0) {
       pruneUnusedAgentArtifacts()
       return { version: current, updated: false }

@@ -23,12 +23,14 @@ export type ReleaseEntry = {
   apiVersion?: number
   authenticodeThumbprint?: string
   windows?: { fileName: string; url: string; sha256: string; sizeBytes: number }
+  source?: { fileName: string; url: string; sha256: string; sizeBytes: number }
+  agent?: { fileName: string; url: string; sha256: string; sizeBytes: number }
   title: string
   notes: string
   sourceCommit: string
 }
 export type ReleaseIndex = {
-  schemaVersion: 2
+  schemaVersion: 2 | 3
   channel: "stable" | "beta" | "alpha"
   sequence: number
   publishedAt: string
@@ -41,6 +43,50 @@ const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
 const SHA = /^[a-f0-9]{64}$/
 export type UpdateChannel = "stable" | "beta" | "alpha"
 const channels: UpdateChannel[] = ["stable", "beta", "alpha"]
+function githubAsset(repo: "nacho-main" | "nacho-server", version: string, name: string, value: unknown) {
+  if (!value || typeof value !== "object") throw new Error("GitHub 制品信息无效")
+  const item = value as Record<string, unknown>
+  if (item.fileName !== name || item.url !==
+      `https://github.com/nachomao/${repo}/releases/download/v${version}/${name}` ||
+      typeof item.sha256 !== "string" || !SHA.test(item.sha256) ||
+      !Number.isSafeInteger(item.sizeBytes) || Number(item.sizeBytes) < 1 ||
+      Number(item.sizeBytes) > MAX_ARTIFACT_BYTES) throw new Error("GitHub 制品信息无效")
+  return item as { fileName: string; url: string; sha256: string; sizeBytes: number }
+}
+function normalizeV3(index: Record<string, unknown>): ReleaseIndex {
+  const releases = index.releases as Record<string, Record<string, unknown>>
+  if (!releases || Object.keys(releases).sort().join(",") !== "panel,server") throw new Error("双仓发布信息无效")
+  const panel = releases.panel, server = releases.server
+  for (const [name, item] of [["panel", panel], ["server", server]] as const) {
+    if (!item || typeof item.version !== "string" || !VERSION.test(item.version) ||
+        typeof item.title !== "string" || !item.title.trim() ||
+        typeof item.notes !== "string" || !item.notes.trim() ||
+        typeof item.sourceCommit !== "string" || !/^[a-f0-9]{40}$/.test(item.sourceCommit) ||
+        typeof item.publishedAt !== "string" || !Number.isFinite(Date.parse(item.publishedAt))) {
+      throw new Error(`${name} 发布信息无效`)
+    }
+  }
+  const panelAsset = githubAsset("nacho-main", panel.version as string,
+    `NachoPanel-Setup-${panel.version}.exe`, panel.asset)
+  const source = githubAsset("nacho-server", server.version as string,
+    `nacho-server-source-${server.version}.tar.gz`, server.source)
+  const agent = githubAsset("nacho-server", server.version as string,
+    `nacho-agent-${server.version}-win-x64.exe`, server.agent)
+  for (const key of ["minPanelVersion", "minAgentVersion", "minServerVersion"]) {
+    if (typeof server[key] !== "string" || !VERSION.test(server[key] as string)) throw new Error(`${key} 无效`)
+  }
+  if (panel.authenticodeThumbprint !== undefined &&
+      (typeof panel.authenticodeThumbprint !== "string" ||
+       !/^[A-F0-9]{40}$/.test(panel.authenticodeThumbprint))) throw new Error("面板证书指纹无效")
+  return {
+    ...index, schemaVersion: 3,
+    releases: {
+      panel: { ...panel, ...panelAsset },
+      server: { ...server, ...source, source, agent },
+      agent: { ...server, ...agent, minServerVersion: server.minServerVersion },
+    },
+  } as ReleaseIndex
+}
 const channelFile = () => path.join(path.dirname(config.databasePath), "update-channel.json")
 export function getUpdateChannel(): UpdateChannel {
   try {
@@ -123,11 +169,12 @@ export function verifyReleaseIndex(bytes: Buffer, signature: Buffer, publicKey: 
   const parsed: unknown = JSON.parse(bytes.toString("utf8"))
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("发布索引格式无效")
   const index = parsed as Record<string, unknown>
-  if (index.schemaVersion !== 2 || !channels.includes(index.channel as UpdateChannel) ||
+  if (![2, 3].includes(index.schemaVersion as number) || !channels.includes(index.channel as UpdateChannel) ||
       !Number.isSafeInteger(index.sequence) || Number(index.sequence) < 1 ||
       typeof index.publishedAt !== "string" || !Number.isFinite(Date.parse(index.publishedAt)) ||
       !index.releases || typeof index.releases !== "object" || Array.isArray(index.releases)) throw new Error("发布索引格式无效")
   const releases = index.releases as Record<string, unknown>
+  if (index.schemaVersion === 3) return normalizeV3(index)
   for (const name of ["panel", "server", "agent"] as const) validateEntry(name, releases[name])
   return index as ReleaseIndex
 }

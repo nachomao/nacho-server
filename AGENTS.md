@@ -1,6 +1,6 @@
 # nacho-server 项目级开发提示词（AGENTS.md）
 
-> 更新服务器源码在工作区私有 `../nacho-update-server/`，不上 GitHub。服务端、Agent 源码仍推送 `nachomao/nacho-server`，随后用工作区根目录 `publish-update.ps1` 通过 SSH/SFTP 发布签名索引和制品；历史 GitHub Release/Pages 工作流已弃用。旧公钥替换需人工安装迁移版。
+> 更新服务器源码在工作区私有 `../nacho-update-server/`，不上 GitHub。服务端与 Agent 同版本源码推送 `nachomao/nacho-server`，在同一次 GitHub Release 发布服务端源码包与 Agent EXE；根目录 `publish-update.ps1` 仅向更新服务器发送签名索引元数据。旧安装实例须人工安装迁移版。
 
 本文件只约束 `nacho-server` 仓库（服务端 + Windows Agent）。面板前端在独立仓库 `nachomao/nacho-main`，其开发约定不在此文件范围内。
 
@@ -58,16 +58,16 @@
 
 - `install.sh` / `uninstall.sh` / `napl` 必须保持 **LF 行尾**（见 `.gitattributes`）。云端部署会把它们上传到 Linux 后直接交给 bash strict mode，CRLF 会导致解析失败。
 - `install.sh` 只从脚本上级目录（仓库根）复制 `package.json`、`package-lock.json`、`tsconfig.json`、`src`、`deploy`、`artifacts`，不得引用仓库根以外的路径。
-- `napl` 在线升级从 `NACHO_UPDATE_ORIGIN` 与受验证的频道读取签名索引，制品地址仅允许指向固定更新服务器的不可变哈希路径；GitHub 仍只用于固定 SHA 源码获取。
+- `napl` 从 `NACHO_UPDATE_ORIGIN` 读取签名索引；v3 服务端源码制品固定在 `nachomao/nacho-server` GitHub Release，并由面板下载、经 Panel API 分块上传至服务端。`napl update check` 可查询，v3 安装须经独立升级执行器在目标主机构建、验证和回滚；旧 v2 索引保持兼容。
 - `deploy/napl-release-public.pem` 是更新索引及 Linux manifest 的 Ed25519 公钥。当前已规划替换公钥，所有旧实例须先人工安装迁移版，不得直接宣称旧客户端仍可在线升级。
-- `deploy/build-release.mjs` 必须在 Linux x64 上运行，由独立更新服务器使用 GitHub 固定提交构建，产出 `control-server-<version>-linux-x64.tar.gz`、`manifest.json` 和 `manifest.sig`。
+- `deploy/build-release.mjs` 保留旧式 Linux 预构建包用途；双仓 v3 的源码包由 `publish-update.ps1` 对固定 Git 提交制作，目标 Linux 主机在暂存区以非特权用户安装锁定依赖并构建，不由更新服务器构建。
 
 ### 4.4 制品策略
 
-- Agent 制品由 `client/deploy/publish.ps1` 在开发 Windows 设备生成，经根目录发布菜单上传私有更新服务器；控制服务端从其签名三组件索引准备制品。既有仓库中的 Agent 制品是迁移期历史文件，服务端发布包不得捆绑它。
+- Agent 制品由 `client/deploy/publish.ps1` 在开发 Windows 设备生成，与服务端源码包共用同版本的 GitHub Release 与公告；面板按需下载，经受认证的 Panel API 准备制品。既有仓库中的 Agent 制品是迁移期历史文件，服务端源码包不得捆绑它。
 - `artifacts/evidence/` 是临时验收证据，不入库。
-- `install.sh` 不依赖 `artifacts/windows/latest.json`；首次安装后服务端自行拉取签名索引所指的 Agent 制品。面板只在使用者确认后下发 Agent 升级命令，正在执行的旧命令引用的制品须保留。
-- Linux 在线升级使用 root 拥有的 `control-server-updater.path/.service` 和固定请求文件；Windows 本机升级由面板本机管理器安装受签名索引约束的预构建包。升级失败必须恢复代码、配置、SQLite 与服务状态。
+- `install.sh` 不依赖 `artifacts/windows/latest.json`；v3 Agent 制品由面板按需准备，向设备下发仍需使用者逐台或批量确认。正在执行的旧命令引用的制品须保留。
+- Linux 升级使用 root 拥有的 `control-server-updater.path/.service` 和固定请求文件，在目标主机从已上传且 SHA-256 校验过的源码构建；Windows 本机升级由面板本机管理器构建受签名索引约束的源码包。升级失败必须恢复代码、配置、SQLite 与服务状态。
 
 ## 5. 部署拓扑
 

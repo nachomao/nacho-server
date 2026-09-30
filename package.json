@@ -1,6 +1,6 @@
 {
   "name": "nacho-server",
-  "version": "1.0.3",
+  "version": "1.1.22",
   "private": true,
   "description": "NachoPanel 服务端 —— 三层架构中的核心控制节点，负责存储业务数据、管理客户端注册与连接、为面板提供 API、下发指令并接收执行结果。",
   "license": "AGPL-3.0",

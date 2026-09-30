@@ -46,3 +46,28 @@ test("未签名面板发布允许省略 Authenticode 指纹，但不能绕过索
   const signedInvalid = signed(invalid)
   assert.throws(() => verifyReleaseIndex(signedInvalid.bytes, signedInvalid.signature, publicKey), /证书指纹/)
 })
+test("双仓 GitHub 发布归一化服务端与 Agent 并拒绝伪造制品地址", () => {
+  const version = "1.1.22"
+  const makeAsset = (repo: string, name: string) => ({
+    fileName: name, url: `https://github.com/nachomao/${repo}/releases/download/v${repo === "nacho-main" ? "0.1.5" : version}/${name}`,
+    sha256: "a".repeat(64), sizeBytes: 123,
+  })
+  const panel = { version: "0.1.5", sourceCommit: "a".repeat(40), title: "面板", notes: "改进",
+    publishedAt: "2026-09-30T00:00:00Z",
+    asset: makeAsset("nacho-main", "NachoPanel-Setup-0.1.5.exe") }
+  const server = { version, sourceCommit: "b".repeat(40), title: "服务端与 Agent", notes: "改进",
+    publishedAt: "2026-09-30T00:00:00Z", minPanelVersion: "0.1.5",
+    minAgentVersion: "1.1.21", minServerVersion: "1.0.3",
+    source: makeAsset("nacho-server", `nacho-server-source-${version}.tar.gz`),
+    agent: makeAsset("nacho-server", `nacho-agent-${version}-win-x64.exe`) }
+  const v3 = { schemaVersion: 3, channel: "stable", sequence: 8,
+    publishedAt: "2026-09-30T00:00:00Z", releases: { panel, server } }
+  const data = signed(v3)
+  const verified = verifyReleaseIndex(data.bytes, data.signature, publicKey)
+  assert.equal(verified.releases.server.source?.sha256, server.source.sha256)
+  assert.equal(verified.releases.agent.version, version)
+  const forged = structuredClone(v3)
+  forged.releases.server.source.url = "https://example.org/source.tar.gz"
+  const broken = signed(forged)
+  assert.throws(() => verifyReleaseIndex(broken.bytes, broken.signature, publicKey), /GitHub 制品信息无效/)
+})

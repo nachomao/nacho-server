@@ -71,8 +71,80 @@ try {
   const [bytes, signature] = await Promise.all([download(indexUrl, 32 * 1024), download(`${indexUrl}.sig`, 128)])
   if (signature.length !== 64 || !verify(null, bytes, pub, signature)) throw new Error("索引签名无效")
   const index = JSON.parse(bytes)
-  if (index.schemaVersion !== 2 || index.channel !== request.channel || index.sequence < request.sequence) throw new Error("索引版本倒退或频道不匹配")
+  if (![2, 3].includes(index.schemaVersion) || index.channel !== request.channel || index.sequence < request.sequence) throw new Error("索引版本倒退或频道不匹配")
   const item = index.releases?.server
+  if (index.schemaVersion === 3) {
+    const source = item?.source
+    const expected = `nacho-server-source-${requestedVersion}.tar.gz`
+    if (item?.version !== requestedVersion || !/^[0-9a-f-]{36}$/.test(request.stageId || "") ||
+        source?.fileName !== expected ||
+        source?.url !== `https://github.com/nachomao/nacho-server/releases/download/v${requestedVersion}/${expected}` ||
+        !/^[a-f0-9]{64}$/.test(source.sha256) || !Number.isSafeInteger(source.sizeBytes) ||
+        source.sizeBytes < 1 || source.sizeBytes > 2 * 1024 ** 3) throw new Error("源码发布无效")
+    const staged = path.join("/var/lib/control-server/update-staging", request.stageId, "payload")
+    if (!fs.lstatSync(path.dirname(staged)).isDirectory() ||
+        fs.lstatSync(staged).isSymbolicLink() || !fs.lstatSync(staged).isFile() ||
+        fs.statSync(staged).size !== source.sizeBytes) {
+      throw new Error("已上传源码大小无效")
+    }
+    const hash = createHash("sha256")
+    for await (const chunk of fs.createReadStream(staged)) hash.update(chunk)
+    if (hash.digest("hex") !== source.sha256) throw new Error("已上传源码 SHA-256 不匹配")
+    status("building")
+    const listing = spawnSync("tar", ["-tzf", staged], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+    const types = spawnSync("tar", ["-tvzf", staged], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+    const allowed = /^(src|deploy|client)(\/[A-Za-z0-9._/-]+)?$|^(package\.json|package-lock\.json|tsconfig\.json)$/
+    if (listing.status !== 0 || types.status !== 0 ||
+        listing.stdout.split("\n").filter(Boolean).some((name) =>
+          name.startsWith("/") || name.split("/").includes("..") || !allowed.test(name.replace(/\/$/, ""))) ||
+        types.stdout.split("\n").filter(Boolean).some((line) => !["-", "d"].includes(line[0]))) {
+      throw new Error("源码归档包含无效文件")
+    }
+    const work = path.join(tmp, "source")
+    fs.mkdirSync(work)
+    const unpack = spawnSync("tar", ["-xzf", staged, "-C", work], { timeout: 60_000 })
+    if (unpack.status !== 0) throw new Error("源码解包失败")
+    const manifest = JSON.parse(fs.readFileSync(path.join(work, "package.json"), "utf8"))
+    if (manifest.name !== "nacho-server" || manifest.version !== requestedVersion) throw new Error("源码版本无效")
+    const agentUid = spawnSync("id", ["-u", "control"], { encoding: "utf8" })
+    const agentGid = spawnSync("id", ["-g", "control"], { encoding: "utf8" })
+    if (agentUid.status !== 0 || agentGid.status !== 0) throw new Error("构建用户不存在")
+    fs.chmodSync(tmp, 0o711)
+    fs.chownSync(work, Number(agentUid.stdout.trim()), Number(agentGid.stdout.trim()))
+    const chown = spawnSync("chown", ["-R", "control:control", work], { timeout: 60_000 })
+    if (chown.status !== 0) throw new Error("构建目录授权失败")
+    for (const args of [["ci", "--no-audit", "--no-fund"], ["run", "build"]]) {
+      const built = spawnSync("runuser", ["-u", "control", "--", "npm", ...args], {
+        cwd: work, encoding: "utf8", timeout: 10 * 60_000,
+        env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: work },
+      })
+      if (built.status !== 0) throw new Error(`服务端源码构建失败（npm ${args[0]}）`)
+    }
+    fs.rmSync(path.join(work, "node_modules"), { recursive: true, force: true })
+    const production = spawnSync("runuser", ["-u", "control", "--", "npm", "ci", "--omit=dev",
+      "--ignore-scripts", "--no-audit", "--no-fund"], {
+      cwd: work, encoding: "utf8", timeout: 10 * 60_000,
+      env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: work },
+    })
+    if (production.status !== 0) throw new Error("生产依赖预检失败")
+    const release = path.join(tmp, "release.tar.gz")
+    const packed = spawnSync("tar", ["-czf", release, "-C", work,
+      "dist", "node_modules", "package.json", "package-lock.json", "deploy"], { timeout: 60_000 })
+    if (packed.status !== 0) throw new Error("构建包打包失败")
+    status("installing")
+    const installed = spawnSync("/bin/bash", [path.join(root, "napl"), "update", "install", release], {
+      encoding: "utf8", timeout: 15 * 60_000,
+      env: { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        NAPL_ENTRYPOINT: "/usr/local/bin/napl", NAPL_VERIFIED_SOURCE: "1",
+        NAPL_RELEASE_PUBLIC_KEY: path.join(root, "release-public.pem"),
+        NACHO_UPDATE_ORIGIN: updateOrigin, NACHO_UPDATE_CHANNEL: request.channel },
+    })
+    if (installed.status !== 0) {
+      status(installed.stderr?.includes("已恢复") ? "rolled-back" : "failed",
+        `napl 安装失败（exit=${installed.status ?? "timeout"}）`)
+      process.exitCode = 1
+    } else status("healthy")
+  } else {
   if (item?.version !== requestedVersion ||
       item?.fileName !== `control-server-${requestedVersion}-linux-x64.tar.gz` ||
       item?.url !== `${updateOrigin}/artifacts/server/${requestedVersion}/${item.sha256}/${item.fileName}` ||
@@ -99,6 +171,7 @@ try {
     process.exitCode = 1
   } else {
     status("healthy")
+  }
   }
 } catch (error) {
   status("failed", error instanceof Error ? error.message : "升级执行失败")

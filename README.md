@@ -158,7 +158,7 @@ napl uninstall purge                # 确认后彻底删除
 
 安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
 
-`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存到 `/var/backups/control-server`，保留最近 10 份。配置变更会先显示预览并在重启或健康检查失败时自动恢复。Panel API Key 与 Enrollment Key 分开轮换，设备 token 不变。在线升级从独立更新服务器 `NACHO_UPDATE_ORIGIN` 获取 Ed25519 签名的三组件频道索引；服务端制品仍有独立签名及 manifest SHA-256 校验。默认 Linux 安装会安装 root 拥有的 `control-server-updater.path/.service` 执行器；控制进程只能提交固定版本请求，不能执行任意 root 命令。`napl update check/install` 仍可独立使用。
+`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存在 `/var/backups/control-server`，保留最近 10 份。配置变更和升级失败时恢复旧状态，设备 token 不变。新协议由独立更新服务器仅提供 Ed25519 签名索引与通知：面板从同版本 `nacho-server` GitHub Release 下载源码与 Agent 制品，经 Panel API 分块传输；Linux root 升级执行器仅构建受信索引约束、大小与 SHA-256 已核对的源码，并负责重启健康检查及回滚。`napl update check` 支持新索引；v3 安装须由面板发起，旧预构建包仍按 manifest 签名校验安装。
 
 ---
 

@@ -13,6 +13,7 @@ import { isOpenEnrollmentEnabled } from "../lib/auth"
 import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
 import * as productUpdates from "../services/product-updates"
+import * as updateStaging from "../services/update-staging"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
 import * as managedArtifacts from "../services/managed-artifacts"
 import * as installProfiles from "../services/install-profiles"
@@ -53,6 +54,27 @@ panelRouter.post("/product-updates/agent-artifact", asyncHandler(async (_req, re
     try { return ok(res, await productUpdates.syncAgentRelease(true), 202) }
     catch (error) { return fail(res, error instanceof Error ? error.message : "Agent 制品准备失败", 503) }
   }))
+panelRouter.post("/product-updates/stages", asyncHandler(async (req, res) => {
+  const body = parseBody(z.object({
+    kind: z.enum(["server","agent"]), version: z.string().regex(/^\d+\.\d+\.\d+$/),
+  }).strict(), req.body)
+  return ok(res, await updateStaging.createStage(body.kind, body.version), 201)
+}))
+panelRouter.get("/product-updates/stages/:id", asyncHandler((req, res) =>
+  ok(res, updateStaging.getStage(req.params.id))))
+panelRouter.put("/product-updates/stages/:id/chunks", asyncHandler(async (req, res) => {
+  if (req.header("content-type") !== "application/octet-stream") return fail(res, "分块格式无效", 415)
+  const offset = Number(req.query.offset)
+  const length = Number(req.header("content-length"))
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)) return fail(res, "分块位置或大小无效", 400)
+  return ok(res, await updateStaging.appendStage(req.params.id, offset, req, length))
+}))
+panelRouter.post("/product-updates/stages/:id/commit", asyncHandler(async (req, res) => {
+  const { panelVersion } = parseBody(z.object({
+    panelVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  }).strict(), req.body)
+  return ok(res, await updateStaging.commitStage(req.params.id, panelVersion), 202)
+}))
 
 /* ==================== 概览 ==================== */
 panelRouter.get(

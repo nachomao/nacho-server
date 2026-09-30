@@ -366,8 +366,8 @@ test("版本能力 API 可供旧面板查询，只有不兼容的升级写操作
     const runtime = await fetch(`${base}/runtime-info`, { headers: authorization })
     assert.equal(runtime.status, 200)
     const body = await runtime.json() as { data: { version: string; minPanelVersion: string } }
-    assert.equal(body.data.version, "1.0.3")
-    assert.equal(body.data.minPanelVersion, "0.1.4")
+    assert.equal(body.data.version, "1.1.22")
+    assert.equal(body.data.minPanelVersion, "0.1.6")
     const oldPanel = await fetch(`${base}/product-updates/server`, {
       method: "POST", headers: { ...authorization, "content-type": "application/json", "x-nacho-panel-version": "0.1.1" },
       body: JSON.stringify({ version: "1.0.1", panelVersion: "0.1.1" }),
@@ -375,6 +375,11 @@ test("版本能力 API 可供旧面板查询，只有不兼容的升级写操作
     assert.equal(oldPanel.status, 426)
     const incompatible = await oldPanel.json() as { minPanelVersion: string }
     assert.equal(incompatible.minPanelVersion, "0.1.4")
+    const legacyStage = await fetch(`${base}/product-updates/stages`, {
+      method: "POST", headers: { ...authorization, "content-type": "application/json", "x-nacho-panel-version": "0.1.5" },
+      body: JSON.stringify({ kind: "agent", version: "1.1.22" }),
+    })
+    assert.equal(legacyStage.status, 426)
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
   }

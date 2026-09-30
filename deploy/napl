@@ -515,16 +515,20 @@ const fs = require("node:fs");
 const data = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const origin = process.env.UPDATE_ORIGIN;
 const release = data?.releases?.server;
+const asset = data?.schemaVersion === 3 ? release?.source : release;
 if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(origin) ||
-    data?.schemaVersion !== 2 || data?.channel !== process.env.UPDATE_CHANNEL ||
-    !Number.isSafeInteger(data.sequence) || !release ||
+    ![2,3].includes(data?.schemaVersion) || data?.channel !== process.env.UPDATE_CHANNEL ||
+    !Number.isSafeInteger(data.sequence) || !release || !asset ||
     !/^\d+\.\d+\.\d+$/.test(release.version) ||
-    !/^[a-f0-9]{64}$/.test(release.sha256) ||
-    !Number.isSafeInteger(release.sizeBytes) || release.sizeBytes < 1 ||
-    release.fileName !== `control-server-${release.version}-linux-x64.tar.gz`) process.exit(1);
-if (release.url !== `${origin}/artifacts/server/${release.version}/${release.sha256}/${release.fileName}`) process.exit(1);
+    !/^[a-f0-9]{64}$/.test(asset.sha256) ||
+    !Number.isSafeInteger(asset.sizeBytes) || asset.sizeBytes < 1 ||
+    asset.fileName !== (data.schemaVersion === 3 ? `nacho-server-source-${release.version}.tar.gz` :
+      `control-server-${release.version}-linux-x64.tar.gz`)) process.exit(1);
+if (asset.url !== (data.schemaVersion === 3 ?
+    `https://github.com/nachomao/nacho-server/releases/download/v${release.version}/${asset.fileName}` :
+    `${origin}/artifacts/server/${release.version}/${asset.sha256}/${asset.fileName}`)) process.exit(1);
 process.stdout.write(JSON.stringify({
-  version: release.version, asset: release.url, sha256: release.sha256, sizeBytes: release.sizeBytes,
+  version: release.version, asset: asset.url, sha256: asset.sha256, sizeBytes: asset.sizeBytes,
 }));
 NODE
 }
@@ -596,6 +600,13 @@ install_release() {
   local package="${1:-}" temp metadata info url stage archive was_active=0 was_enabled=0 current backup old_dir
   temp="$(mktemp -d)"
   trap 'rm -rf "${temp:-}"' RETURN
+  if [ -z "$package" ] && [ "${NAPL_VERIFIED_SOURCE:-}" != 1 ]; then
+    local probe="$temp/latest.json"
+    download_signed_index "$probe" || die "$EXIT_INTEGRITY" "签名发布索引无效。"
+    if node -e 'process.exit(require(process.argv[1]).schemaVersion===3?0:1)' "$probe"; then
+      die "$EXIT_VALIDATION" "源码更新须由面板上传并经独立升级执行器构建。"
+    fi
+  fi
   if [ -n "$package" ]; then
     [ -f "$package" ] || die "$EXIT_VALIDATION" "本地升级包不存在：$package"
     cp -a "$package" "$temp/package.tar.gz"
@@ -622,7 +633,9 @@ NODE
     mkdir -p "$temp/release"
     tar -xzf "$temp/package.tar.gz" -C "$temp/release" || die "$EXIT_INTEGRITY" "在线升级包解包失败。"
   fi
-  verify_release_manifest "$temp/release" || die "$EXIT_INTEGRITY" "升级包签名或文件哈希校验失败。"
+  if [ "${NAPL_VERIFIED_SOURCE:-}" != 1 ]; then
+    verify_release_manifest "$temp/release" || die "$EXIT_INTEGRITY" "升级包签名或文件哈希校验失败。"
+  fi
   [ -d "$temp/release/dist" ] || die "$EXIT_INTEGRITY" "升级包缺少 dist。"
 
   current="$(create_backup)"

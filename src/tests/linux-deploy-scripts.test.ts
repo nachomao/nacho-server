@@ -1,5 +1,7 @@
 import assert from "node:assert/strict"
+import { spawnSync } from "node:child_process"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 
@@ -103,16 +105,44 @@ const REPO_SLUG = "nachomao/nacho-server"
 test("source repository identity remains correct while upgrade artifacts use the independent server", () => {
   assert.match(install, new RegExp(`Documentation=https://github\\.com/${REPO_SLUG.replace("/", "\\/")}`))
   assert.equal(manifest.repository?.url, `git+https://github.com/${REPO_SLUG}.git`)
-  assert.doesNotMatch(napl, /github\.com\/.*releases\/download/)
+  assert.match(napl, /github\.com\/nachomao\/nacho-server\/releases\/download/)
 })
 
 test("napl validates the signed independent update server index and immutable asset URL", () => {
   assert.match(napl, /RELEASE_INDEX_URL/)
   assert.match(napl, /openssl pkeyutl -verify/)
   assert.match(napl, /UPDATE_CHANNEL/)
-  assert.match(napl, /schemaVersion !== 2/)
+  assert.match(napl, /includes\(data\?\.schemaVersion\)/)
   assert.match(napl, /artifacts\/server/)
   assert.match(napl, /crypto\.createHash\("sha256"\)/)
+})
+
+test("napl update check reads signed-index v3 source asset and rejects substituted GitHub URLs", () => {
+  const script = /latest_release_asset\(\) \{[\s\S]*?node - "\$metadata" <<'NODE'\n([\s\S]*?)\nNODE/.exec(napl)?.[1]
+  assert.ok(script, "应提取 napl 的版本解析脚本")
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "napl-v3-check-"))
+  const file = path.join(directory, "index.json")
+  const version = "1.1.22"
+  const fileName = `nacho-server-source-${version}.tar.gz`
+  const asset = { fileName, sizeBytes: 100, sha256: "a".repeat(64),
+    url: `https://github.com/nachomao/nacho-server/releases/download/v${version}/${fileName}` }
+  const index = { schemaVersion: 3, channel: "stable", sequence: 3,
+    releases: { server: { version, source: asset } } }
+  const run = () => spawnSync(process.execPath, ["-", file], {
+    input: script, encoding: "utf8",
+    env: { ...process.env, UPDATE_ORIGIN: "https://maojiu.cc", UPDATE_CHANNEL: "stable" },
+  })
+  try {
+    fs.writeFileSync(file, JSON.stringify(index))
+    const valid = run()
+    assert.equal(valid.status, 0)
+    assert.deepEqual(JSON.parse(valid.stdout), { version, asset: asset.url, sha256: asset.sha256, sizeBytes: 100 })
+    asset.url = "https://example.org/other.tar.gz"
+    fs.writeFileSync(file, JSON.stringify(index))
+    assert.equal(run().status, 1)
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test("server project identity stays nacho-server for the Windows local launcher", () => {

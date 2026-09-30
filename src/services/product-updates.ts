@@ -62,12 +62,13 @@ export async function changeUpdateChannel(channel: UpdateChannel) {
   return { channel }
 }
 
-export async function requestServerUpdate(version: string, panelVersion: string) {
+export async function requestServerUpdate(version: string, panelVersion: string, stageId?: string) {
   if (process.platform !== "linux") throw new Error("Windows 本机服务请使用面板本机管理器升级")
   if (!fs.existsSync("/etc/systemd/system/control-server-updater.path")) throw new Error("尚未安装独立升级执行器")
   const { index, stale } = await getReleaseIndex(true)
   if (stale) throw new Error("离线缓存不可用于升级")
   const target = index.releases.server
+  if (index.schemaVersion === 3 && !stageId) throw new Error("须先通过面板传输完整服务端源码")
   if (target.version !== version || compareReleaseVersions(version, packageInfo.version) <= 0) throw new Error("目标版本不是可信的新版本")
   if (target.minPanelVersion && compareReleaseVersions(panelVersion, target.minPanelVersion) < 0) throw new Error("请先升级面板再升级服务端")
   if (target.minAgentVersion) {
@@ -78,7 +79,8 @@ export async function requestServerUpdate(version: string, panelVersion: string)
       })
     if (incompatible.length) throw new Error(`存在 ${incompatible.length} 台 Agent 不兼容目标服务端，请先手动更新`)
   }
-  const request = { version, sequence: index.sequence, channel: getUpdateChannel(), requestedAt: new Date().toISOString() }
+  const request = { version, sequence: index.sequence, channel: getUpdateChannel(),
+    stageId, requestedAt: new Date().toISOString() }
   fs.mkdirSync(path.dirname(requestPath), { recursive: true })
   try { fs.mkdirSync(lockPath) } catch { throw new Error("服务端升级已经在执行") }
   const temporary = `${requestPath}.${randomUUID()}.tmp`
