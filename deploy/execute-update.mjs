@@ -64,16 +64,24 @@ try {
   fs.rmSync(requestFile)
   requestedVersion = request.version
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(requestedVersion) ||
-      !Number.isSafeInteger(request.sequence) || !["stable", "beta", "alpha"].includes(request.channel) ||
+      !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
+      (request.feed !== "recommended" && !["stable", "beta", "alpha"].includes(request.channel)) ||
       !/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(updateOrigin)) throw new Error("升级请求无效")
   status("downloading")
-  const indexUrl = `${updateOrigin}/updates/${request.channel}/index.json`
+  const recommended = request.feed === "recommended"
+  const indexUrl = recommended ? `${updateOrigin}/updates/revisions/${request.sequence}/index.json` :
+    `${updateOrigin}/updates/${request.channel}/index.json`
   const [bytes, signature] = await Promise.all([download(indexUrl, 32 * 1024), download(`${indexUrl}.sig`, 128)])
   if (signature.length !== 64 || !verify(null, bytes, pub, signature)) throw new Error("索引签名无效")
   const index = JSON.parse(bytes)
-  if (![2, 3].includes(index.schemaVersion) || index.channel !== request.channel || index.sequence < request.sequence) throw new Error("索引版本倒退或频道不匹配")
+  if (recommended ? index.schemaVersion !== 4 || index.sequence !== request.sequence || index.channel !== undefined :
+      ![2, 3].includes(index.schemaVersion) || index.channel !== request.channel || index.sequence < request.sequence) {
+    throw new Error("索引序号或升级协议不匹配")
+  }
   const item = index.releases?.server
-  if (index.schemaVersion === 3) {
+  if (index.schemaVersion === 4 && (typeof item?.releaseType !== "string" ||
+      !/^[a-z][a-z0-9-]{0,31}$/.test(item.releaseType))) throw new Error("服务端发布类型无效")
+  if (index.schemaVersion === 3 || index.schemaVersion === 4) {
     const source = item?.source
     const expected = `nacho-server-source-${requestedVersion}.tar.gz`
     if (item?.version !== requestedVersion || !/^[0-9a-f-]{36}$/.test(request.stageId || "") ||
@@ -137,7 +145,7 @@ try {
       env: { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         NAPL_ENTRYPOINT: "/usr/local/bin/napl", NAPL_VERIFIED_SOURCE: "1",
         NAPL_RELEASE_PUBLIC_KEY: path.join(root, "release-public.pem"),
-        NACHO_UPDATE_ORIGIN: updateOrigin, NACHO_UPDATE_CHANNEL: request.channel },
+        NACHO_UPDATE_ORIGIN: updateOrigin, NAPL_LEGACY_CHANNEL: recommended ? "" : request.channel },
     })
     if (installed.status !== 0) {
       status(installed.stderr?.includes("已恢复") ? "rolled-back" : "failed",
@@ -162,7 +170,7 @@ try {
       NAPL_ENTRYPOINT: "/usr/local/bin/napl",
       NAPL_RELEASE_PUBLIC_KEY: path.join(root, "release-public.pem"),
       NACHO_UPDATE_ORIGIN: updateOrigin,
-      NACHO_UPDATE_CHANNEL: request.channel,
+      NAPL_LEGACY_CHANNEL: request.channel,
     },
   })
   if (result.status !== 0) {

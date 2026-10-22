@@ -331,10 +331,15 @@ main() {
   require_root
   detect_os
   install_node
+  if ! bash "${SCRIPT_DIR}/prepare-download-tool.sh" --install-only; then
+    warn "aria2 自动准备失败，GitHub 文件下载将使用单连接。"
+  fi
   setup_user_dirs
   deploy_code
   write_env
   install_service
+  APP_USER="${APP_USER}" DATA_DIR="${DATA_DIR}" bash "${SCRIPT_DIR}/install-download-service.sh" ||
+    warn "固定下载工具准备入口安装失败，缺少工具时将使用单连接。"
   open_firewall
   summary
 }

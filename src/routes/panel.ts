@@ -57,8 +57,9 @@ panelRouter.post("/product-updates/agent-artifact", asyncHandler(async (_req, re
 panelRouter.post("/product-updates/stages", asyncHandler(async (req, res) => {
   const body = parseBody(z.object({
     kind: z.enum(["server","agent"]), version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   }).strict(), req.body)
-  return ok(res, await updateStaging.createStage(body.kind, body.version), 201)
+  return ok(res, await updateStaging.createStage(body.kind, body.version, body.sequence), 201)
 }))
 panelRouter.get("/product-updates/stages/:id", asyncHandler((req, res) =>
   ok(res, updateStaging.getStage(req.params.id))))

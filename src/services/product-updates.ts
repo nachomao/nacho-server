@@ -4,7 +4,7 @@ import path from "node:path"
 import { config } from "../config"
 import { agentArtifactVersion, syncAgentRelease } from "./agent-release-sync"
 import * as clients from "./clients"
-import { compareReleaseVersions, getReleaseIndex, getUpdateChannel, setUpdateChannel, type UpdateChannel } from "./release-index"
+import { compareReleaseVersions, getReleaseIndex, UPDATE_ORIGIN, type UpdateChannel } from "./release-index"
 
 const packageInfo = JSON.parse(fs.readFileSync(path.join(config.rootDir, "package.json"), "utf8")) as { version: string }
 const compatibility = JSON.parse(fs.readFileSync(path.join(config.rootDir, "deploy", "compatibility.json"), "utf8")) as {
@@ -34,7 +34,12 @@ export function runtimeInfo() {
     agentArtifactVersion: agentArtifactVersion(),
     updateExecutor: process.platform === "linux" && fs.existsSync("/etc/systemd/system/control-server-updater.path"),
     updateStatus: status,
-    updateChannel: getUpdateChannel(),
+    updateMode: "recommended",
+    updateSourceConfigured: /^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(UPDATE_ORIGIN) && UPDATE_ORIGIN !== "https://updates.example.invalid",
+    updateExecutorProtocol: (() => {
+      try { return fs.readFileSync("/usr/local/lib/nacho-updater/execute-update.mjs", "utf8").includes("schemaVersion === 4") ? 4 : 3 }
+      catch { return null }
+    })(),
   }
 }
 
@@ -52,23 +57,22 @@ export async function availableUpdates() {
   const releases = await getReleaseIndex()
   return { ...runtimeInfo(), ...releases }
 }
-export async function changeUpdateChannel(channel: UpdateChannel) {
-  const { index, stale } = await getReleaseIndex(true, channel)
-  if (stale) throw new Error("离线索引不可用于切换频道")
-  if (compareReleaseVersions(index.releases.server.version, packageInfo.version) < 0) throw new Error("目标频道服务端版本低于当前版本")
-  const agent = agentArtifactVersion()
-  if (agent && compareReleaseVersions(index.releases.agent.version, agent) < 0) throw new Error("目标频道 Agent 制品版本低于当前版本")
-  setUpdateChannel(channel)
-  return { channel }
+export async function changeUpdateChannel(_channel: UpdateChannel) {
+  throw new Error("更新类型由更新服务器决定，请安装支持统一推荐更新的面板")
 }
 
-export async function requestServerUpdate(version: string, panelVersion: string, stageId?: string) {
+export async function requestServerUpdate(version: string, panelVersion: string, stageId?: string, sequence?: number) {
   if (process.platform !== "linux") throw new Error("Windows 本机服务请使用面板本机管理器升级")
   if (!fs.existsSync("/etc/systemd/system/control-server-updater.path")) throw new Error("尚未安装独立升级执行器")
-  const { index, stale } = await getReleaseIndex(true)
-  if (stale) throw new Error("离线缓存不可用于升级")
+  const latest = await getReleaseIndex(true)
+  const { index, stale } = sequence === undefined ? latest : await getReleaseIndex(true, sequence)
+  if (stale || latest.stale) throw new Error("离线缓存不可用于升级")
   const target = index.releases.server
-  if (index.schemaVersion === 3 && !stageId) throw new Error("须先通过面板传输完整服务端源码")
+  if (latest.index.releases.server.version !== version || latest.index.releases.server.sha256 !== target.sha256) {
+    throw new Error("服务端推荐版本已变化，请重新检查并确认")
+  }
+  if ((index.schemaVersion === 3 || index.schemaVersion === 4) && !stageId) throw new Error("须先通过面板传输完整服务端源码")
+  if (index.schemaVersion === 4 && runtimeInfo().updateExecutorProtocol !== 4) throw new Error("独立升级执行器需要迁移至推荐索引协议")
   if (target.version !== version || compareReleaseVersions(version, packageInfo.version) <= 0) throw new Error("目标版本不是可信的新版本")
   if (target.minPanelVersion && compareReleaseVersions(panelVersion, target.minPanelVersion) < 0) throw new Error("请先升级面板再升级服务端")
   if (target.minAgentVersion) {
@@ -79,7 +83,7 @@ export async function requestServerUpdate(version: string, panelVersion: string,
       })
     if (incompatible.length) throw new Error(`存在 ${incompatible.length} 台 Agent 不兼容目标服务端，请先手动更新`)
   }
-  const request = { version, sequence: index.sequence, channel: getUpdateChannel(),
+  const request = { version, sequence: index.sequence, feed: "recommended",
     stageId, requestedAt: new Date().toISOString() }
   fs.mkdirSync(path.dirname(requestPath), { recursive: true })
   try { fs.mkdirSync(lockPath) } catch { throw new Error("服务端升级已经在执行") }

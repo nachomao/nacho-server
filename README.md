@@ -158,7 +158,13 @@ napl uninstall purge                # 确认后彻底删除
 
 安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
 
-`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存在 `/var/backups/control-server`，保留最近 10 份。配置变更和升级失败时恢复旧状态，设备 token 不变。新协议由独立更新服务器仅提供 Ed25519 签名索引与通知：面板从同版本 `nacho-server` GitHub Release 下载源码与 Agent 制品，经 Panel API 分块传输；Linux root 升级执行器仅构建受信索引约束、大小与 SHA-256 已核对的源码，并负责重启健康检查及回滚。`napl update check` 支持新索引；v3 安装须由面板发起，旧预构建包仍按 manifest 签名校验安装。
+`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存在 `/var/backups/control-server`，保留最近 10 份。配置变更和升级失败时恢复旧状态，设备 token 不变。更新服务器仅提供 Ed25519 签名索引与通知：面板从同版本 `nacho-server` GitHub Release 下载源码与 Agent 制品，经 Panel API 分块传输；Linux root 升级执行器仅构建受信索引约束、大小与 SHA-256 已核对的源码，并负责重启健康检查及回滚。`napl update check` 默认读取统一推荐索引；源码安装须由面板发起，旧预构建包仍按 manifest 签名校验安装。
+
+推荐索引 `schemaVersion=4` 使用全局 `sequence`，`panel`、`server` 各有 `releaseType`，Agent 沿用服务端类型。`GET /updates/index.json` 重定向至不可变 `/updates/revisions/<sequence>/index.json`，`.sig` 必须读取同一次发布的地址。旧 `update-channel.json`、`NACHO_UPDATE_CHANNEL` 不影响默认更新；仅显式 `NAPL_LEGACY_CHANNEL` 保留旧 v2/v3 检查入口。
+
+`GET /api/panel/runtime-info` 返回 `updateMode`、`updateSourceConfigured`、`updateExecutorProtocol`。旧频道写接口返回迁移提示，不再保存频道；更新写接口要求面板至少 0.2.4。创建上传会话必须提交 `{kind, version, sequence}`，服务端独立验签固定索引，并核对目标仍被推荐。上传期间只有面板发布变化可以继续提交；服务端／Agent 目标变化需重新确认。缓存只供展示，Agent 不会自动下发。
+
+旧安装需人工安装迁移版本、在原 `.env` 配置 `NACHO_UPDATE_ORIGIN` 的 HTTPS 根地址，并以原安装参数重新运行 `deploy/install.sh`，迁移 root 拥有的 `/usr/local/lib/nacho-updater` 副本。仅替换 Node 服务源码不能迁移独立执行器。后续受信升级会在健康检查通过后更新执行器副本。迁移应先备份原配置和数据库，保持已有凭据及数据；未配置时继续保持更新不可用。
 
 ---
 
@@ -410,3 +416,11 @@ Windows 安装链接固定为 `http://SERVER:PORT/nacho.ps1`，与控制服务�
 HTTP 与 WebSocket 的通用结果持久化入口都拒绝超过 512 KiB 的结果。对于 `collect-logs`，服务端业务日志只记录结果字节数，不把采集正文复制到服务端日志表；正文只保存在对应命令结果中。面板会对全部结果字段、每条记录、来源计数、控制字符和字节上限进行严格校验，畸形 JSON 只显示为未解析结果。
 
 新安装 Agent 的 `allowLogCollection` 为 `false`，升级不会覆盖已有管理员配置。日志内容可能包含业务与设备诊断数据；管理员应选择最短必要时间窗与最少来源，避免采集凭据，并在真实验收后恢复配置。当前范围排除任意文件/通道/XPath、Security 日志、PowerShell 操作日志、远程机器、实时订阅、删除、导出包和服务端日志聚合。
+
+## GitHub 下载和 Linux 下载工具
+
+公开 GitHub 制品下载先在当前机器并行检测直连与镜像，5 秒内选择可用入口；优先 GitHub，失败后使用 `gh-proxy.com`、`ghfast.top`。签名索引内的官方制品地址不会被替换，下载完成仍严格核对大小与 SHA-256。
+
+仅 GitHub 的文件下载启用并发：达到 8 MiB 且支持 Range 时，Linux 使用 aria2，最多四路连接，每段最小 2 MiB。其他下载、API 查询、上传和 Git 克隆不启用文件分段；不支持 Range 或大小未知时降为单连接。连接成功但速度慢不会触发主动换源，网络失败则清理未完成文件并尝试剩余入口。
+
+安装与已验证的升级流程会尝试从 apt-get、dnf 或 yum 安装固定的 `aria2` 软件包，准备时间最多三分钟。普通服务缺少工具时，只能向 `control-server-downloader.path` 提交固定的 aria2 请求，由 root 拥有的执行器安装；不授予业务用户 sudo 或任意安装命令权限。工具安装失败、无包源或缺少特权入口时会记录原因并使用单连接。卸载删除本项目的工具准备单元，保留系统安装的 aria2 软件包。

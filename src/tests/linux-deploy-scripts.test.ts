@@ -136,7 +136,7 @@ test("napl update check reads signed-index v3 source asset and rejects substitut
     fs.writeFileSync(file, JSON.stringify(index))
     const valid = run()
     assert.equal(valid.status, 0)
-    assert.deepEqual(JSON.parse(valid.stdout), { version, asset: asset.url, sha256: asset.sha256, sizeBytes: 100 })
+    assert.deepEqual(JSON.parse(valid.stdout), { version, releaseType: "stable", asset: asset.url, sha256: asset.sha256, sizeBytes: 100 })
     asset.url = "https://example.org/other.tar.gz"
     fs.writeFileSync(file, JSON.stringify(index))
     assert.equal(run().status, 1)
@@ -150,4 +150,29 @@ test("server project identity stays nacho-server for the Windows local launcher"
   assert.equal(manifest.license, "AGPL-3.0")
   const launcher = fs.readFileSync(path.join(deployDir, "windows", "local-control-server.ps1"), "utf8")
   assert.match(launcher, /\$Manifest\.name -ne "nacho-server"/)
+})
+
+test("napl v4 使用组件发布类型，忽略旧频道，并拒绝非固定 GitHub 制品", () => {
+  const script = /latest_release_asset\(\) \{[\s\S]*?node - "\$metadata" <<'NODE'\n([\s\S]*?)\nNODE/.exec(napl)?.[1]
+  assert.ok(script)
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "napl-v4-check-"))
+  const file = path.join(directory, "index.json")
+  const version = "1.1.24", fileName = `nacho-server-source-${version}.tar.gz`
+  const index = { schemaVersion: 4, sequence: 9, releases: {
+    server: { version, releaseType: "stable", source: { fileName, sha256: "a".repeat(64), sizeBytes: 100,
+      url: `https://github.com/nachomao/nacho-server/releases/download/v${version}/${fileName}` } },
+  } }
+  const run = () => spawnSync(process.execPath, ["-", file], { input: script, encoding: "utf8",
+    env: { ...process.env, UPDATE_ORIGIN: "https://maojiu.cc", UPDATE_CHANNEL: "alpha" } })
+  try {
+    fs.writeFileSync(file, JSON.stringify(index))
+    const valid = run()
+    assert.equal(valid.status, 0)
+    assert.equal(JSON.parse(valid.stdout).releaseType, "stable")
+    index.releases.server.source.url = "https://example.org/source.tar.gz"
+    fs.writeFileSync(file, JSON.stringify(index))
+    assert.equal(run().status, 1)
+    assert.doesNotMatch(napl, /DATA_DIR\/update-channel\.json/)
+    assert.match(napl, /updates\/revisions/)
+  } finally { fs.rmSync(directory, { recursive: true, force: true }) }
 })

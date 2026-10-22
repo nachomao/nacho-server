@@ -29,6 +29,14 @@ if [ "${APP_NAME}" = "control-server" ] && [ "${DATA_DIR}" = "/var/lib/control-s
   systemctl daemon-reload
 fi
 
+if [ "${APP_NAME}" = "control-server" ] && [ "${DATA_DIR}" = "/var/lib/control-server" ]; then
+  systemctl disable --now control-server-downloader.path >/dev/null 2>&1 || true
+  systemctl stop control-server-downloader.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/control-server-downloader.path /etc/systemd/system/control-server-downloader.service
+  rm -rf /usr/local/lib/nacho-downloader
+  systemctl daemon-reload
+fi
+
 if systemctl list-unit-files 2>/dev/null | grep -q "^${APP_NAME}.service"; then
   log "停止并禁用服务 ${APP_NAME}"
   systemctl stop "${APP_NAME}.service" || true

@@ -4,12 +4,12 @@ import path from "node:path"
 import { pipeline } from "node:stream/promises"
 import { Readable, Transform } from "node:stream"
 import { config } from "../config"
-import { getReleaseIndex, getUpdateChannel, type ReleaseEntry } from "./release-index"
-import { requestServerUpdate } from "./product-updates"
+import { compareReleaseVersions, getReleaseIndex, type ReleaseEntry } from "./release-index"
+import { requestServerUpdate, runtimeInfo } from "./product-updates"
 
 type Kind = "server" | "agent"
 type Stage = {
-  id: string; kind: Kind; version: string; sequence: number; channel: string
+  id: string; kind: Kind; version: string; sequence: number; feed: "recommended"
   sizeBytes: number; sha256: string; fileName: string; offset: number; phase: "uploading" | "ready"
   publishedAt: string
 }
@@ -48,7 +48,16 @@ function entryFor(kind: Kind, entry: ReleaseEntry) {
   if (kind === "server") return entry.source
   return entry.agent
 }
-export async function createStage(kind: Kind, version: string) {
+function agentCompatibility(entry: ReleaseEntry) {
+  const runtime = runtimeInfo()
+  if (entry.minServerVersion && compareReleaseVersions(runtime.version, entry.minServerVersion) < 0) {
+    throw new Error("需要先升级服务端才能提供此 Agent 版本")
+  }
+  if (runtime.agentArtifactVersion && compareReleaseVersions(entry.version, runtime.agentArtifactVersion) < 0) {
+    throw new Error("Agent 制品版本不可倒退")
+  }
+}
+export async function createStage(kind: Kind, version: string, sequence: number, readIndex = getReleaseIndex) {
   if (kind === "server" && process.platform !== "linux") {
     throw new Error("Windows 本机服务请使用面板本机升级管理器")
   }
@@ -56,14 +65,20 @@ export async function createStage(kind: Kind, version: string) {
   if (fs.readdirSync(base).filter((id) => /^[0-9a-f-]{36}$/.test(id)).length >= 8) {
     throw new Error("更新上传会话已达上限")
   }
-  const { index, stale } = await getReleaseIndex(true)
-  if (stale || index.schemaVersion !== 3 || index.releases.server.version !== version) {
+  const latest = await readIndex(true)
+  const { index, stale } = await readIndex(true, sequence)
+  if (stale || latest.stale || index.schemaVersion !== 4 || index.releases.server.version !== version ||
+      latest.index.releases.server.version !== version) {
     throw new Error("目标不是有效的 GitHub 服务端发布")
   }
   const asset = entryFor(kind, index.releases.server)
-  if (!asset) throw new Error("制品信息缺失")
+  const currentAsset = entryFor(kind, latest.index.releases.server)
+  if (!asset || !currentAsset || asset.sha256 !== currentAsset.sha256 || asset.sizeBytes !== currentAsset.sizeBytes) {
+    throw new Error("推荐制品已变化，请重新检查并确认")
+  }
+  if (kind === "agent") agentCompatibility(index.releases.server)
   const id = randomUUID()
-  const stage: Stage = { id, kind, version, sequence: index.sequence, channel: getUpdateChannel(),
+  const stage: Stage = { id, kind, version, sequence: index.sequence, feed: "recommended",
     sizeBytes: asset.sizeBytes, sha256: asset.sha256, fileName: asset.fileName,
     offset: 0, phase: "uploading", publishedAt: index.releases.server.publishedAt }
   fs.mkdirSync(stagePath(id), { recursive: true, mode: 0o700 })
@@ -95,15 +110,15 @@ export async function appendStage(id: string, offset: number, input: Readable, l
     throw error
   } finally { busy.delete(id) }
 }
-export async function commitStage(id: string, panelVersion: string) {
+export async function commitStage(id: string, panelVersion: string, readIndex = getReleaseIndex) {
   const stage = read(id)
   if (stage.phase === "ready") return stage
   if (stage.phase !== "uploading" || busy.has(id) || stage.offset !== stage.sizeBytes) {
     throw new Error("会话尚未完整传输或已提交")
   }
-  const { index, stale } = await getReleaseIndex(true)
+  const { index, stale } = await readIndex(true)
   const asset = entryFor(stage.kind, index.releases.server)
-  if (stale || index.schemaVersion !== 3 || index.channel !== stage.channel ||
+  if (stale || index.schemaVersion !== 4 || stage.feed !== "recommended" ||
       index.sequence < stage.sequence || index.releases.server.version !== stage.version ||
       !asset || asset.sha256 !== stage.sha256 || asset.sizeBytes !== stage.sizeBytes) {
     throw new Error("发布清单与上传会话不匹配")
@@ -114,6 +129,7 @@ export async function commitStage(id: string, panelVersion: string) {
     throw new Error("上传制品哈希或大小不匹配")
   }
   if (stage.kind === "agent") {
+    agentCompatibility(index.releases.server)
     const directory = path.join(config.artifactsPath, "windows")
     fs.mkdirSync(directory, { recursive: true })
     const destination = path.join(directory, stage.fileName)
@@ -124,7 +140,7 @@ export async function commitStage(id: string, panelVersion: string) {
     fs.writeFileSync(path.join(directory, "latest.json.tmp"), JSON.stringify(manifest))
     fs.renameSync(path.join(directory, "latest.json.tmp"), path.join(directory, "latest.json"))
   } else {
-    await requestServerUpdate(stage.version, panelVersion, id)
+    await requestServerUpdate(stage.version, panelVersion, id, stage.sequence)
   }
   stage.phase = "ready"
   save(stage)

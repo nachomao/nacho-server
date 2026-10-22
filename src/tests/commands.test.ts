@@ -342,9 +342,9 @@ test("release reader rejects an artifact hash mismatch", () => {
 test("仅对声明了最低面板版本的写操作返回升级要求", () => {
   assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/channel", "0.1.3"), "0.1.4")
   assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/channel", "0.1.4"), null)
-  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", undefined), "0.1.4")
-  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", "0.1.3"), "0.1.4")
-  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", "0.1.4"), null)
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", undefined), "0.2.4")
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", "0.1.3"), "0.2.4")
+  assert.equal(productUpdates.operationCompatibility("POST", "/product-updates/server", "0.2.4"), null)
   assert.equal(productUpdates.operationCompatibility("GET", "/runtime-info", undefined), null)
   assert.equal(productUpdates.operationCompatibility("POST", "/tasks", undefined), null)
   assert.equal(productUpdates.operationCompatibility("POST", "/agent-updates", "0.1.0"), null)
@@ -366,7 +366,7 @@ test("版本能力 API 可供旧面板查询，只有不兼容的升级写操作
     const runtime = await fetch(`${base}/runtime-info`, { headers: authorization })
     assert.equal(runtime.status, 200)
     const body = await runtime.json() as { data: { version: string; minPanelVersion: string } }
-    assert.equal(body.data.version, "1.1.22")
+    assert.equal(body.data.version, JSON.parse(fs.readFileSync("package.json", "utf8")).version)
     assert.equal(body.data.minPanelVersion, "0.1.6")
     const oldPanel = await fetch(`${base}/product-updates/server`, {
       method: "POST", headers: { ...authorization, "content-type": "application/json", "x-nacho-panel-version": "0.1.1" },
@@ -374,7 +374,7 @@ test("版本能力 API 可供旧面板查询，只有不兼容的升级写操作
     })
     assert.equal(oldPanel.status, 426)
     const incompatible = await oldPanel.json() as { minPanelVersion: string }
-    assert.equal(incompatible.minPanelVersion, "0.1.4")
+    assert.equal(incompatible.minPanelVersion, "0.2.4")
     const legacyStage = await fetch(`${base}/product-updates/stages`, {
       method: "POST", headers: { ...authorization, "content-type": "application/json", "x-nacho-panel-version": "0.1.5" },
       body: JSON.stringify({ kind: "agent", version: "1.1.22" }),

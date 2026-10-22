@@ -3,14 +3,14 @@
   "minPanelVersion": "0.1.6",
   "minAgentVersion": "1.0.0",
   "features": {
-    "productUpdates": "0.1.6",
+    "productUpdates": "0.2.4",
     "agentUpdates": "0.1.0"
   },
   "routes": [
     { "prefix": "/product-updates/channel", "methods": ["POST"], "minPanelVersion": "0.1.4" },
-    { "prefix": "/product-updates/server", "methods": ["POST"], "minPanelVersion": "0.1.4" },
-    { "prefix": "/product-updates/agent-artifact", "methods": ["POST"], "minPanelVersion": "0.1.4" },
+    { "prefix": "/product-updates/server", "methods": ["POST"], "minPanelVersion": "0.2.4" },
+    { "prefix": "/product-updates/agent-artifact", "methods": ["POST"], "minPanelVersion": "0.2.4" },
     { "prefix": "/agent-updates", "methods": ["POST"], "minPanelVersion": "0.1.0" },
-    { "prefix": "/product-updates/stages", "methods": ["POST", "GET", "PUT"], "minPanelVersion": "0.1.6" }
+    { "prefix": "/product-updates/stages", "methods": ["POST", "GET", "PUT"], "minPanelVersion": "0.2.4" }
   ]
 }

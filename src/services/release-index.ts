@@ -4,7 +4,7 @@ import path from "node:path"
 import { config } from "../config"
 
 export const UPDATE_ORIGIN = process.env.NACHO_UPDATE_ORIGIN || "https://updates.example.invalid"
-export const RELEASE_INDEX_URL = `${UPDATE_ORIGIN}/updates/stable/index.json`
+export const RELEASE_INDEX_URL = `${UPDATE_ORIGIN}/updates/index.json`
 export const RELEASE_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA2qjcjfU4N2/nMmD9XkemMqqq6P0K6OVfjAnwlBJDU1g=
 -----END PUBLIC KEY-----`
@@ -12,6 +12,7 @@ MCowBQYDK2VwAyEA2qjcjfU4N2/nMmD9XkemMqqq6P0K6OVfjAnwlBJDU1g=
 export type ReleaseComponent = "panel" | "server" | "agent"
 export type ReleaseEntry = {
   version: string
+  releaseType?: string
   fileName: string
   url: string
   sha256: string
@@ -30,8 +31,8 @@ export type ReleaseEntry = {
   sourceCommit: string
 }
 export type ReleaseIndex = {
-  schemaVersion: 2 | 3
-  channel: "stable" | "beta" | "alpha"
+  schemaVersion: 2 | 3 | 4
+  channel?: "stable" | "beta" | "alpha"
   sequence: number
   publishedAt: string
   releases: Record<ReleaseComponent, ReleaseEntry>
@@ -65,6 +66,8 @@ function normalizeV3(index: Record<string, unknown>): ReleaseIndex {
         typeof item.publishedAt !== "string" || !Number.isFinite(Date.parse(item.publishedAt))) {
       throw new Error(`${name} 发布信息无效`)
     }
+    if (index.schemaVersion === 4 && (typeof item.releaseType !== "string" ||
+        !/^[a-z][a-z0-9-]{0,31}$/.test(item.releaseType))) throw new Error("发布类型无效")
   }
   const panelAsset = githubAsset("nacho-main", panel.version as string,
     `NachoPanel-Setup-${panel.version}.exe`, panel.asset)
@@ -79,7 +82,7 @@ function normalizeV3(index: Record<string, unknown>): ReleaseIndex {
       (typeof panel.authenticodeThumbprint !== "string" ||
        !/^[A-F0-9]{40}$/.test(panel.authenticodeThumbprint))) throw new Error("面板证书指纹无效")
   return {
-    ...index, schemaVersion: 3,
+    ...index,
     releases: {
       panel: { ...panel, ...panelAsset },
       server: { ...server, ...source, source, agent },
@@ -87,25 +90,11 @@ function normalizeV3(index: Record<string, unknown>): ReleaseIndex {
     },
   } as ReleaseIndex
 }
-const channelFile = () => path.join(path.dirname(config.databasePath), "update-channel.json")
-export function getUpdateChannel(): UpdateChannel {
-  try {
-    const value = JSON.parse(fs.readFileSync(channelFile(), "utf8")) as { channel?: UpdateChannel }
-    return channels.includes(value.channel as UpdateChannel) ? value.channel! : "stable"
-  } catch { return "stable" }
-}
-export function indexUrl(channel = getUpdateChannel()) {
-  if (!channels.includes(channel)) throw new Error("无效更新频道")
+export function indexUrl(sequence?: number) {
+  if (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 1)) throw new Error("推荐索引序号无效")
   if (UPDATE_ORIGIN === "https://updates.example.invalid") throw new Error("请先配置独立更新服务器的 NACHO_UPDATE_ORIGIN")
   if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(UPDATE_ORIGIN)) throw new Error("更新服务器 HTTPS 地址无效")
-  return `${UPDATE_ORIGIN}/updates/${channel}/index.json`
-}
-export function setUpdateChannel(channel: UpdateChannel) {
-  if (!channels.includes(channel)) throw new Error("无效更新频道")
-  fs.mkdirSync(path.dirname(channelFile()), { recursive: true })
-  fs.writeFileSync(`${channelFile()}.tmp`, JSON.stringify({ channel }), { mode: 0o600 })
-  fs.renameSync(`${channelFile()}.tmp`, channelFile())
-  memory = null
+  return sequence === undefined ? RELEASE_INDEX_URL : `${UPDATE_ORIGIN}/updates/revisions/${sequence}/index.json`
 }
 const FILE: Record<ReleaseComponent, RegExp> = {
   panel: /^NachoPanel-Setup-\d+\.\d+\.\d+\.exe$/,
@@ -169,21 +158,21 @@ export function verifyReleaseIndex(bytes: Buffer, signature: Buffer, publicKey: 
   const parsed: unknown = JSON.parse(bytes.toString("utf8"))
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("发布索引格式无效")
   const index = parsed as Record<string, unknown>
-  if (![2, 3].includes(index.schemaVersion as number) || !channels.includes(index.channel as UpdateChannel) ||
+  if (![2, 3, 4].includes(index.schemaVersion as number) ||
+      (index.schemaVersion !== 4 && !channels.includes(index.channel as UpdateChannel)) ||
+      (index.schemaVersion === 4 && index.channel !== undefined) ||
       !Number.isSafeInteger(index.sequence) || Number(index.sequence) < 1 ||
       typeof index.publishedAt !== "string" || !Number.isFinite(Date.parse(index.publishedAt)) ||
       !index.releases || typeof index.releases !== "object" || Array.isArray(index.releases)) throw new Error("发布索引格式无效")
   const releases = index.releases as Record<string, unknown>
-  if (index.schemaVersion === 3) return normalizeV3(index)
+  if (index.schemaVersion === 3 || index.schemaVersion === 4) return normalizeV3(index)
   for (const name of ["panel", "server", "agent"] as const) validateEntry(name, releases[name])
   return index as ReleaseIndex
 }
 
-let memory: { index: ReleaseIndex; checkedAt: number; channel: UpdateChannel } | null = null
-const cacheFile = (channel: UpdateChannel) => path.join(path.dirname(config.databasePath), `release-index-cache-${channel}.json`)
-
-async function download(url: string, maxBytes: number): Promise<Buffer> {
+async function download(url: string, maxBytes: number): Promise<{ bytes: Buffer; url: string }> {
   const response = await fetch(url, { signal: AbortSignal.timeout(15_000) })
+  if (response.status === 404) throw new Error("更新服务器尚未提供推荐索引，请先迁移更新服务")
   if (!response.ok) throw new Error(`发布索引读取失败（HTTP ${response.status}）`)
   if (Number(response.headers.get("content-length")) > maxBytes || !response.body) throw new Error("发布索引大小无效")
   const chunks: Buffer[] = []
@@ -195,37 +184,61 @@ async function download(url: string, maxBytes: number): Promise<Buffer> {
   }
   const bytes = Buffer.concat(chunks)
   if (!bytes.length || bytes.length > maxBytes) throw new Error("发布索引大小无效")
-  return bytes
+  return { bytes, url: response.url || url }
 }
 
-export async function getReleaseIndex(force = false, channel = getUpdateChannel()): Promise<{ index: ReleaseIndex; stale: boolean }> {
-  if (!force && memory?.channel === channel && Date.now() - memory.checkedAt < 24 * 60 * 60 * 1000) return { index: memory.index, stale: false }
-  let old: ReleaseIndex | null = null
-  try {
-    const cached = JSON.parse(fs.readFileSync(cacheFile(channel), "utf8")) as { bytes: string; signature: string }
-    old = verifyReleaseIndex(Buffer.from(cached.bytes, "base64"), Buffer.from(cached.signature, "base64"))
-    if (old.channel !== channel) old = null
-  } catch { /* 损坏或不存在的缓存不可用于升级 */ }
-  try {
-    const [bytes, signature] = await Promise.all([
-      download(indexUrl(channel), MAX_INDEX_BYTES),
-      download(`${indexUrl(channel)}.sig`, 128),
-    ])
-    const index = verifyReleaseIndex(bytes, signature)
-    if (index.channel !== channel) throw new Error("更新频道与签名索引不一致")
-    if (old && index.sequence < old.sequence) throw new Error("发布索引发生版本倒退")
-    for (const component of ["panel", "server", "agent"] as const) {
-      if (old && compareReleaseVersions(index.releases[component].version, old.releases[component].version) < 0) {
-        throw new Error(`${component} 发布版本倒退`)
-      }
-    }
-    fs.mkdirSync(path.dirname(cacheFile(channel)), { recursive: true })
-    fs.writeFileSync(`${cacheFile(channel)}.tmp`, JSON.stringify({ bytes: bytes.toString("base64"), signature: signature.toString("base64") }))
-    fs.renameSync(`${cacheFile(channel)}.tmp`, cacheFile(channel))
-    memory = { index, checkedAt: Date.now(), channel }
-    return { index, stale: false }
-  } catch (error) {
-    if (old && !(error instanceof Error && /倒退|签名无效/.test(error.message))) return { index: old, stale: true }
-    throw error
+export function createReleaseIndexReader(publicKey: string | KeyObject = RELEASE_PUBLIC_KEY) {
+  let memory: { index: ReleaseIndex; checkedAt: number } | null = null
+  const cacheFile = () => path.join(path.dirname(config.databasePath), "release-index-cache-recommended.json")
+  let checking: Promise<{ index: ReleaseIndex; stale: boolean }> | null = null
+  function getReleaseIndex(force = false, sequence?: number): Promise<{ index: ReleaseIndex; stale: boolean }> {
+    if (sequence !== undefined) return loadReleaseIndex(force, sequence)
+    if (checking) return checking
+    checking = loadReleaseIndex(force).finally(() => { checking = null })
+    return checking
   }
+  async function loadReleaseIndex(force = false, sequence?: number): Promise<{ index: ReleaseIndex; stale: boolean }> {
+    if (sequence === undefined && !force && memory && Date.now() - memory.checkedAt < 60_000) return { index: memory.index, stale: false }
+    let old: ReleaseIndex | null = null
+    try {
+      const cached = JSON.parse(fs.readFileSync(cacheFile(), "utf8")) as { bytes: string; signature: string }
+      old = verifyReleaseIndex(Buffer.from(cached.bytes, "base64"), Buffer.from(cached.signature, "base64"), publicKey)
+      if (old.schemaVersion !== 4) old = null
+    } catch { /* 损坏或不存在的缓存不可用于升级 */ }
+    try {
+      const remote = await download(indexUrl(sequence), MAX_INDEX_BYTES)
+      const match = /^\/updates\/revisions\/([1-9]\d*)\/index\.json$/.exec(new URL(remote.url).pathname)
+      if (new URL(remote.url).origin !== UPDATE_ORIGIN || !match ||
+          (sequence !== undefined && Number(match[1]) !== sequence)) throw new Error("推荐索引固定地址无效")
+      const bytes = remote.bytes
+      const { bytes: signature } = await download(`${remote.url}.sig`, 128)
+      const index = verifyReleaseIndex(bytes, signature, publicKey)
+      if (index.schemaVersion !== 4 || index.sequence !== Number(match[1])) throw new Error("推荐索引序号或协议无效")
+      if (sequence !== undefined) return { index, stale: false }
+      if (old && (index.sequence < old.sequence ||
+          (index.sequence === old.sequence && JSON.stringify(index) !== JSON.stringify(old)))) throw new Error("发布索引发生版本倒退或同序号内容变化")
+      for (const component of ["panel", "server", "agent"] as const) {
+        if (old && compareReleaseVersions(index.releases[component].version, old.releases[component].version) < 0) {
+          throw new Error(`${component} 发布版本倒退`)
+        }
+        if (old && index.releases[component].version === old.releases[component].version &&
+            (index.releases[component].sha256 !== old.releases[component].sha256 ||
+             index.releases[component].sizeBytes !== old.releases[component].sizeBytes)) {
+          throw new Error(`${component} 同版本内容变化`)
+        }
+      }
+      fs.mkdirSync(path.dirname(cacheFile()), { recursive: true })
+      fs.writeFileSync(`${cacheFile()}.tmp`, JSON.stringify({ bytes: bytes.toString("base64"), signature: signature.toString("base64") }))
+      fs.renameSync(`${cacheFile()}.tmp`, cacheFile())
+      memory = { index, checkedAt: Date.now() }
+      return { index, stale: false }
+    } catch (error) {
+      memory = null
+      if (sequence === undefined && old && error instanceof Error &&
+          /HTTP|fetch|网络|超时|timed out|abort/i.test(error.message)) return { index: old, stale: true }
+      throw error
+    }
+  }
+  return getReleaseIndex
 }
+export const getReleaseIndex = createReleaseIndexReader()

@@ -87,7 +87,7 @@ public sealed class WindowsProcessIntegrationTests
             "..", "..", "..", "..",
             "Nacho.Agent.TestProcess", "bin", configuration, "net10.0-windows", "nacho-agent-test-process.exe"));
         Assert.True(File.Exists(executable), $"Test helper was not built: {executable}");
-        return Process.Start(new ProcessStartInfo
+        var process = Process.Start(new ProcessStartInfo
         {
             FileName = executable,
             UseShellExecute = false,
@@ -95,6 +95,21 @@ public sealed class WindowsProcessIntegrationTests
             RedirectStandardOutput = redirectOutput,
             ArgumentList = { argument },
         }) ?? throw new InvalidOperationException("Test helper failed to start.");
+        // Process.Start 返回时，Windows 可能尚未装载主模块；全量并行测试会放大这一启动窗口。
+        var ready = SpinWait.SpinUntil(() =>
+        {
+            process.Refresh();
+            if (process.HasExited) return true;
+            try { return process.MainModule is not null; }
+            catch (System.ComponentModel.Win32Exception) { return false; }
+        }, TimeSpan.FromSeconds(5));
+        if (!ready || process.HasExited)
+        {
+            Stop(process);
+            process.Dispose();
+            throw new InvalidOperationException("Test helper did not finish process initialization.");
+        }
+        return process;
     }
 
     private static WindowsProcessTerminator Create(string allowedPath) => new(
