@@ -3,6 +3,12 @@ dist
 .nacho-runtime
 .nacho-local
 *.log
+*.pid
+
+# .NET 编译输出（client/.gitignore 已覆盖，此处兜底仓库内其它工程）
+**/bin/
+**/obj/
+**/*.tsbuildinfo
 
 # 运行时数据与密钥
 data/
