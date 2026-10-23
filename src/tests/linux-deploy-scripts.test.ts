@@ -15,6 +15,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(repoDir, "package.json"), 
   name?: string
   license?: string
   repository?: { url?: string }
+  scripts?: Record<string, string>
 }
 
 test("Linux installation installs napl and protects an existing entrypoint", () => {
@@ -175,4 +176,25 @@ test("napl v4 使用组件发布类型，忽略旧频道，并拒绝非固定 Gi
     assert.doesNotMatch(napl, /DATA_DIR\/update-channel\.json/)
     assert.match(napl, /updates\/revisions/)
   } finally { fs.rmSync(directory, { recursive: true, force: true }) }
+})
+
+test("构建产物必须包含 src/lib 的 .cjs 运行时资源", () => {
+  assert.match(manifest.scripts?.build ?? "", /deploy\/build-assets\.mjs/)
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "nacho-build-assets-"))
+  try {
+    const run = spawnSync(process.execPath, ["deploy/build-assets.mjs"], {
+      cwd: repoDir, encoding: "utf8", env: { ...process.env, NACHO_DIST_DIR: out },
+    })
+    assert.equal(run.status, 0, run.stderr)
+    // agent-release-sync 启动时 require 这个文件，缺失会让服务端直接崩溃。
+    assert.ok(fs.existsSync(path.join(out, "lib", "github-download.cjs")))
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true })
+  }
+})
+
+test("卸载脚本按单元文件判断服务，避免 pipefail 下的 SIGPIPE 漏删", () => {
+  assert.doesNotMatch(uninstall, /systemctl list-unit-files[^\n]*\|\s*grep -q/)
+  assert.ok(uninstall.includes('[ -f "/etc/systemd/system/${APP_NAME}.service" ]'))
+  assert.match(uninstall, /systemctl daemon-reload/)
 })

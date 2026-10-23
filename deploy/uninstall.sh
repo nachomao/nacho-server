@@ -37,7 +37,10 @@ if [ "${APP_NAME}" = "control-server" ] && [ "${DATA_DIR}" = "/var/lib/control-s
   systemctl daemon-reload
 fi
 
-if systemctl list-unit-files 2>/dev/null | grep -q "^${APP_NAME}.service"; then
+# 直接判断单元文件，不把 systemctl 的输出接进 grep -q：后者命中后立即退出会让
+# systemctl 收到 SIGPIPE，在 set -o pipefail 下整条管道判为失败，服务单元会被遗留，
+# 并以 Restart=on-failure 反复重启（云部署回滚后仍残留崩溃循环）。
+if [ -f "/etc/systemd/system/${APP_NAME}.service" ] || [ -f "/usr/lib/systemd/system/${APP_NAME}.service" ]; then
   log "停止并禁用服务 ${APP_NAME}"
   systemctl stop "${APP_NAME}.service" || true
   systemctl disable "${APP_NAME}.service" || true
