@@ -79,6 +79,9 @@ test("napl exposes the documented non-interactive command surface", () => {
 test("napl 交互菜单使用统一选择器、状态头部与无色降级，且保留源码载入入口", () => {
   assert.match(napl, /menu_select\(\) \{/)
   assert.match(napl, /render_menu_frame\(\) \{/)
+  assert.match(napl, /menu_item_line\(\) \{/)
+  assert.match(napl, /menu_redraw_item\(\) \{/)
+  assert.match(napl, /menu_park_cursor\(\) \{/)
   assert.match(napl, /menu_status_load\(\) \{/)
   assert.match(napl, /menu_step_index\(\) \{/)
   assert.match(napl, /NO_COLOR/)

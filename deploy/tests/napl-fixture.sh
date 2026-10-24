@@ -175,7 +175,7 @@ def drain(fd, out, seconds):
             return
         out.extend(chunk)
 
-def run_session(actions, needles):
+def run_session(actions, needles, max_clears=None):
     pid, fd = pty.fork()
     if pid == 0:
         os.execvpe("bash", ["bash", "-c", 'source "$1"; menu', "_", napl], os.environ)
@@ -206,6 +206,8 @@ def run_session(actions, needles):
         missing = [name for name in needles if name not in text]
         if missing:
             return "交互菜单 pty 输出缺少：%s" % ", ".join(repr(x) for x in missing)
+        if max_clears is not None and text.count("\x1b[2J") > max_clears:
+            return "方向键导航触发了整屏重绘（%d 次）" % text.count("\x1b[2J")
         if not (os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0):
             return "交互菜单 pty 子进程状态异常：%s" % status
         return ""
@@ -220,33 +222,45 @@ cases = [
         [(None, 1.0), (b"\x1b[B\n", 1.0), (b"q", 0.5), (b"q", 0.5)],
         ["NACHO SERVER", "运行概览", "服务控制", "启动服务", "密钥", "\x1b["],
         "服务控制导航",
+        None,
+    ),
+    (
+        [(None, 1.0), (b"\x1b[B", 0.25), (b"\x1b[B", 0.25), (b"\x1b[B", 0.25),
+         (b"\x1b[B", 0.25), (b"q", 0.5)],
+        ["NACHO SERVER", "\x1b[13;1H"],
+        "方向键导航不整屏重绘",
+        1,
     ),
     (
         [(None, 1.0), (b"3", 0.8), (b"2", 0.8), (b"\x03", 0.8), (b"\n", 0.5), (b"q", 0.3), (b"q", 0.5)],
         ["NACHO SERVER", "实时跟随", "journalctl"],
         "日志跟随 Ctrl-C 后返回菜单",
+        None,
     ),
     (
         [(None, 1.0), (b"5", 0.6), (b"q", 0.4), (b"4", 0.6), (b"q", 0.4),
          (b"6", 0.6), (b"q", 0.4), (b"q", 0.4)],
         ["轮换 Panel API Key", "轮换 Enrollment Key", "查看当前配置", "立即创建备份", "恢复备份"],
         "密钥/配置/备份子菜单",
+        None,
     ),
     (
         [(None, 1.0), (b"4", 0.6), (b"2", 0.6), (b"\n" * 9, 1.0), (b"q", 0.4), (b"q", 0.4)],
         ["监听地址 HOST", "配置未变更"],
         "配置逐项回车保持原值",
+        None,
     ),
     (
         [(None, 1.0), (b"2", 0.6), (b"1", 0.8), (b"\n", 0.5), (b"q", 0.4), (b"q", 0.4)],
         ["服务操作完成：start"],
         "服务控制执行动作并暂停",
+        None,
     ),
 ]
 
 failed = False
-for actions, needles, label in cases:
-    error = run_session(actions, needles)
+for actions, needles, label, max_clears in cases:
+    error = run_session(actions, needles, max_clears)
     if error:
         print("%s：%s" % (label, error), file=sys.stderr)
         failed = True

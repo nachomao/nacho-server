@@ -888,6 +888,11 @@ MENU_START_CURSOR=0
 MENU_LAST_INDEX=0
 MENU_QUIT=0
 
+# render_banner 固定输出 5 行；随后是空行、标题、空行，因此第一项固定在第 9 行。
+# 方向键只重绘选项行，依赖这里的行号，修改头部布局时必须同步。
+MENU_BANNER_LINES=5
+MENU_ITEM_ROW_START=$((MENU_BANNER_LINES + 4))
+
 MAIN_MENU_ITEMS=(
   "status|运行概览|版本、服务、健康与磁盘"
   "service|服务控制|启动、停止或重启服务"
@@ -935,7 +940,16 @@ menu_restore_terminal() {
     stty echo icanon 2>/dev/null || true
   fi
   printf '%s' "${C_RESET:-}"
+  if menu_supports_ansi; then
+    printf '\033[?25h'
+  fi
   return 0
+}
+
+menu_hide_cursor() {
+  if menu_supports_ansi; then
+    printf '\033[?25l'
+  fi
 }
 
 menu_traps_install() {
@@ -992,33 +1006,54 @@ render_banner() {
   printf '%s\n' "${C_DIM}────────────────────────────────────────────────────${C_RESET}"
 }
 
+# 输出单个选项行（不含换行），供整屏渲染和方向键增量重绘共用。
+menu_item_line() {
+  local index="$1" cursor="$2" count="$3" item="$4"
+  local id rest label description number
+  id="${item%%|*}"
+  rest="${item#*|}"
+  label="${rest%%|*}"
+  description="${rest#*|}"
+  number=$((index + 1))
+  if [ "$index" -eq "$((count - 1))" ] && { [ "$id" = "exit" ] || [ "$id" = "back" ]; }; then
+    number=0
+  fi
+  if [ "$index" -eq "$cursor" ]; then
+    printf ' %s➤%s %s%2d)%s %s%s%s' "$C_ACCENT" "$C_RESET" "$C_BOLD" "$number" "$C_RESET" "$C_ACCENT" "$label" "$C_RESET"
+  else
+    printf '   %s%2d)%s %s' "$C_DIM" "$number" "$C_RESET" "$label"
+  fi
+  if [ -n "$description" ]; then
+    printf ' %s· %s%s' "$C_DIM" "$description" "$C_RESET"
+  fi
+}
+
 render_menu_frame() {
   local title="$1" cursor="$2"
   shift 2
-  local items=("$@") index=0 item id rest label description number
+  local items=("$@") count=${#items[@]} index=0 item
   render_banner
   printf '\n%s[ %s ]%s\n\n' "$C_TITLE" "$title" "$C_RESET"
   for item in "${items[@]}"; do
-    id="${item%%|*}"
-    rest="${item#*|}"
-    label="${rest%%|*}"
-    description="${rest#*|}"
-    number=$((index + 1))
-    if [ "$index" -eq "$((${#items[@]} - 1))" ] && { [ "$id" = "exit" ] || [ "$id" = "back" ]; }; then
-      number=0
-    fi
-    if [ "$index" -eq "$cursor" ]; then
-      printf ' %s➤%s %s%2d)%s %s%s%s' "$C_ACCENT" "$C_RESET" "$C_BOLD" "$number" "$C_RESET" "$C_ACCENT" "$label" "$C_RESET"
-    else
-      printf '   %s%2d)%s %s' "$C_DIM" "$number" "$C_RESET" "$label"
-    fi
-    if [ -n "$description" ]; then
-      printf ' %s· %s%s' "$C_DIM" "$description" "$C_RESET"
-    fi
+    menu_item_line "$index" "$cursor" "$count" "$item"
     printf '\n'
     index=$((index + 1))
   done
   printf '\n%s↑/↓ 移动   Enter 选择   1-9 直达   0 退出/返回   q/Esc 返回   r 刷新%s\n' "$C_DIM" "$C_RESET"
+}
+
+# 方向键导航时只重绘旧/新两行，避免整屏 clear 引起 SSH 终端闪烁。
+menu_redraw_item() {
+  local index="$1" cursor="$2" count="$3" item="$4"
+  printf '\033[%d;1H' "$((MENU_ITEM_ROW_START + index))"
+  menu_item_line "$index" "$cursor" "$count" "$item"
+  printf '\033[K'
+}
+
+# 把隐藏光标停到页脚下方，保证后续动作输出从菜单之后开始。
+menu_park_cursor() {
+  local count="$1"
+  printf '\033[%d;1H' "$((MENU_ITEM_ROW_START + count + 2))"
 }
 
 menu_step_index() {
@@ -1037,7 +1072,7 @@ menu_select() {
   local items=("$@")
   local count=${#items[@]}
   local cursor="${MENU_START_CURSOR:-0}"
-  local key arrow number
+  local key arrow number old_cursor redraw=1
   MENU_RESULT=""
   if [ "$count" -le 0 ]; then
     return 1
@@ -1047,8 +1082,11 @@ menu_select() {
   fi
   menu_status_load
   while :; do
-    menu_clear
-    render_menu_frame "$title" "$cursor" "${items[@]}"
+    if [ "$redraw" = 1 ]; then
+      menu_clear
+      render_menu_frame "$title" "$cursor" "${items[@]}"
+      redraw=0
+    fi
     if ! IFS= read -rsn1 -r key; then
       MENU_LAST_INDEX="$cursor"
       return 1
@@ -1059,6 +1097,7 @@ menu_select() {
         if ! IFS= read -rsn2 -t 0.3 -r arrow; then
           arrow=""
         fi
+        old_cursor="$cursor"
         case "$arrow" in
           '[A'|'OA') cursor="$(menu_step_index "$cursor" "$count" up)" ;;
           '[B'|'OB') cursor="$(menu_step_index "$cursor" "$count" down)" ;;
@@ -1069,6 +1108,15 @@ menu_select() {
             return 1
             ;;
         esac
+        if [ "$cursor" != "$old_cursor" ]; then
+          if menu_supports_ansi; then
+            menu_redraw_item "$old_cursor" -1 "$count" "${items[$old_cursor]}"
+            menu_redraw_item "$cursor" "$cursor" "$count" "${items[$cursor]}"
+            menu_park_cursor "$count"
+          else
+            redraw=1
+          fi
+        fi
         ;;
       ''|' ')
         MENU_LAST_INDEX="$cursor"
@@ -1095,6 +1143,7 @@ menu_select() {
         ;;
       r|R)
         menu_status_load
+        redraw=1
         ;;
       *)
         ;;
@@ -1328,6 +1377,7 @@ menu() {
   MENU_START_CURSOR=0
   MENU_LAST_INDEX=0
   menu_traps_install
+  menu_hide_cursor
   local main_index=0
   while :; do
     MENU_START_CURSOR="$main_index"
