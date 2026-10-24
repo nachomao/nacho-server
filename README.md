@@ -147,6 +147,7 @@ Windows 安装器会将完整日志保存到 `%ProgramData%\Nacho\install.log`�
 常用运维：
 
 ```bash
+sudo napl                           # 交互式运维菜单（箭头选择、数字直达）
 napl status                         # 运行概览
 napl start|stop|restart             # 服务控制
 napl logs --follow                  # 实时日志
@@ -158,7 +159,7 @@ napl uninstall purge                # 确认后彻底删除
 
 安装位置：代码 `/opt/control-server`，数据库 `/var/lib/control-server/control.db`，配置 `/opt/control-server/.env`。面板和 Agent 应连接该服务器的可达地址或域名，不要把其地址写成客户端自身的 `localhost`。
 
-`napl` 交互菜单需要终端；管理操作需要 root 或可用的 `sudo`。备份默认保存在 `/var/backups/control-server`，保留最近 10 份。配置变更和升级失败时恢复旧状态，设备 token 不变。更新服务器仅提供 Ed25519 签名索引与通知：面板从同版本 `nacho-server` GitHub Release 下载源码与 Agent 制品，经 Panel API 分块传输；Linux root 升级执行器仅构建受信索引约束、大小与 SHA-256 已核对的源码，并负责重启健康检查及回滚。`napl update check` 默认读取统一推荐索引；源码安装须由面板发起，旧预构建包仍按 manifest 签名校验安装。
+`napl` 无参数进入交互式运维菜单，需要终端和管理权限；顶部显示版本、服务、健康、监听地址与磁盘。菜单支持 `↑/↓` 移动、`Enter` 或数字键执行、`q`/`Esc` 返回、`r` 刷新状态；`NO_COLOR=1` 或 `TERM=dumb` 时自动降级为无色文本。非交互子命令及其退出码保持不变。备份默认保存在 `/var/backups/control-server`，保留最近 10 份。配置变更和升级失败时恢复旧状态，设备 token 不变。更新服务器仅提供 Ed25519 签名索引与通知：面板从同版本 `nacho-server` GitHub Release 下载源码与 Agent 制品，经 Panel API 分块传输；Linux root 升级执行器仅构建受信索引约束、大小与 SHA-256 已核对的源码，并负责重启健康检查及回滚。`napl update check` 默认读取统一推荐索引；源码安装须由面板发起，旧预构建包仍按 manifest 签名校验安装。
 
 推荐索引 `schemaVersion=4` 使用全局 `sequence`，`panel`、`server` 各有 `releaseType`，Agent 沿用服务端类型。`GET /updates/index.json` 重定向至不可变 `/updates/revisions/<sequence>/index.json`，`.sig` 必须读取同一次发布的地址。旧 `update-channel.json`、`NACHO_UPDATE_CHANNEL` 不影响默认更新；仅显式 `NAPL_LEGACY_CHANNEL` 保留旧 v2/v3 检查入口。
 

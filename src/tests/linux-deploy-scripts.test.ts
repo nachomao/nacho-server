@@ -76,6 +76,22 @@ test("napl exposes the documented non-interactive command surface", () => {
   assert.match(napl, /EXIT_ROLLBACK=7/)
 })
 
+test("napl 交互菜单使用统一选择器、状态头部与无色降级，且保留源码载入入口", () => {
+  assert.match(napl, /menu_select\(\) \{/)
+  assert.match(napl, /render_menu_frame\(\) \{/)
+  assert.match(napl, /menu_status_load\(\) \{/)
+  assert.match(napl, /menu_step_index\(\) \{/)
+  assert.match(napl, /NO_COLOR/)
+  assert.match(napl, /BASH_SOURCE\[0\]/)
+  assert.match(napl, /\$'\\033'/)
+  // 旧版盲目提示已被子菜单替换，避免再次退化为“输入字母/单词”的交互。
+  assert.doesNotMatch(napl, /printf 'panel\/enrollment/)
+  assert.doesNotMatch(napl, /printf 'start\/stop\/restart/)
+  assert.doesNotMatch(napl, /printf 'list\/create\/restore/)
+  assert.doesNotMatch(napl, /printf 'check\/install/)
+  assert.doesNotMatch(napl, /printf 'keep-data\/purge/)
+})
+
 test("release builder creates the fixed Linux asset name and signs the manifest", () => {
   assert.match(release, /control-server-\$\{version\}-linux-x64\.tar\.gz/)
   assert.match(release, /manifest\.sig/)
