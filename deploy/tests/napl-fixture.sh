@@ -8,8 +8,9 @@ INSTALL_DIR="$ROOT/install"
 DATA_DIR="$ROOT/data"
 BACKUP_DIR="$ROOT/backups"
 BIN_DIR="$ROOT/bin"
+DEPLOY_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$INSTALL_DIR/deploy" "$DATA_DIR" "$BACKUP_DIR" "$BIN_DIR"
-cp "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/napl" "$INSTALL_DIR/deploy/napl"
+cp "${DEPLOY_SRC}/napl" "$INSTALL_DIR/deploy/napl"
 chmod 755 "$INSTALL_DIR/deploy/napl"
 cat >"$INSTALL_DIR/package.json" <<'JSON'
 {"version":"1.0.0"}
@@ -256,6 +257,18 @@ cases = [
         "服务控制执行动作并暂停",
         None,
     ),
+    (
+        [(None, 1.0), (b"9", 0.6), (b"q", 0.4), (b"q", 0.4)],
+        ["访问信息", "一次性展示"],
+        "设置菜单访问信息入口",
+        None,
+    ),
+    (
+        [(None, 1.0), (b"9", 0.6), (b"1", 0.8), (b"\n", 0.5), (b"q", 0.4), (b"q", 0.4)],
+        ["面板/API 地址", "test-panel-key", "test-enrollment-key"],
+        "设置访问信息列出地址和密钥",
+        None,
+    ),
 ]
 
 failed = False
@@ -270,6 +283,128 @@ print("menu pty test passed")
 PY
 else
   printf 'napl 交互菜单 pty 测试已跳过（需要 Linux + python3 pty）\n' >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 访问信息：默认每次显示；一次性展示后永久隐藏
+# ---------------------------------------------------------------------------
+
+access_env="$INSTALL_DIR/.env"
+access_default="$(env "${COMMON_ENV[@]}" bash -c 'source "$1"; show_access_info' _ "$NAPL")"
+printf '%s' "$access_default" | grep -qF 'test-panel-key' || {
+  printf '访问信息未列出 Panel API Key\n' >&2
+  exit 1
+}
+printf '%s' "$access_default" | grep -qF '每次查看都会显示' || {
+  printf '访问信息缺少默认展示说明\n' >&2
+  exit 1
+}
+
+if [ "$(uname -s)" = "Linux" ]; then
+  # env_set 依赖 GNU chown --reference，仅在 Linux 上验证完整启用/消耗流程。
+  sed -i '/^NACHO_ACCESS_INFO_ONCE=/d;/^NACHO_ACCESS_INFO_SHOWN=/d' "$access_env"
+  enable_output="$(printf 'ENABLE\n' | env "${COMMON_ENV[@]}" \
+    bash -c 'source "$1"; enable_access_info_once' _ "$NAPL")"
+  printf '%s' "$enable_output" | grep -qF '无法取消' || {
+    printf '启用提示未说明无法取消\n' >&2
+    exit 1
+  }
+  grep -q '^NACHO_ACCESS_INFO_ONCE=1$' "$access_env" || {
+    printf '一次性展示设置未写入 .env\n' >&2
+    exit 1
+  }
+  access_first="$(env "${COMMON_ENV[@]}" bash -c 'source "$1"; show_access_info' _ "$NAPL")"
+  printf '%s' "$access_first" | grep -qF 'test-panel-key' || {
+    printf '一次性展示首次查看未列出密钥\n' >&2
+    exit 1
+  }
+  printf '%s' "$access_first" | grep -qF '最后一次显示' || {
+    printf '一次性展示首次查看缺少提示\n' >&2
+    exit 1
+  }
+  grep -q '^NACHO_ACCESS_INFO_SHOWN=1$' "$access_env" || {
+    printf '一次性展示未记录已展示状态\n' >&2
+    exit 1
+  }
+  access_second="$(env "${COMMON_ENV[@]}" bash -c 'source "$1"; show_access_info' _ "$NAPL")"
+  if printf '%s' "$access_second" | grep -qE 'test-panel-key|test-enrollment-key'; then
+    printf '一次性展示后仍泄露密钥\n' >&2
+    exit 1
+  fi
+  printf '%s' "$access_second" | grep -qF '已隐藏' || {
+    printf '一次性展示后未显示隐藏状态\n' >&2
+    exit 1
+  }
+else
+  printf 'NACHO_ACCESS_INFO_ONCE=1\nNACHO_ACCESS_INFO_SHOWN=1\n' >>"$access_env"
+  access_hidden="$(env "${COMMON_ENV[@]}" bash -c 'source "$1"; show_access_info' _ "$NAPL")"
+  if printf '%s' "$access_hidden" | grep -qE 'test-panel-key|test-enrollment-key'; then
+    printf '一次性展示隐藏状态仍泄露密钥\n' >&2
+    exit 1
+  fi
+  printf '%s' "$access_hidden" | grep -qF '无法取消' || {
+    printf '一次性展示隐藏状态缺少不可取消提示\n' >&2
+    exit 1
+  }
+fi
+
+# ---------------------------------------------------------------------------
+# 安装摘要：默认列出地址和密钥；一次性展示启用后只显示一次并隐藏 URL
+# ---------------------------------------------------------------------------
+
+sed -i '/^NACHO_ACCESS_INFO_ONCE=/d;/^NACHO_ACCESS_INFO_SHOWN=/d' "$access_env"
+summary_default="$(env INSTALL_DIR="$INSTALL_DIR" DATA_DIR="$DATA_DIR" \
+  bash -c 'source "$1"; summary' _ "$DEPLOY_SRC/install.sh")"
+printf '%s' "$summary_default" | grep -qF '面板/API 地址' || {
+  printf '安装摘要未列出面板/API 地址\n' >&2
+  exit 1
+}
+printf '%s' "$summary_default" | grep -qF 'test-panel-key' || {
+  printf '安装摘要未列出 Panel API Key\n' >&2
+  exit 1
+}
+printf '%s' "$summary_default" | grep -qF 'test-enrollment-key' || {
+  printf '安装摘要未列出注册密钥\n' >&2
+  exit 1
+}
+
+summary_hidden="$(env INSTALL_DIR="$INSTALL_DIR" DATA_DIR="$DATA_DIR" NACHO_HIDE_INSTALL_SECRETS=1 \
+  bash -c 'source "$1"; summary' _ "$DEPLOY_SRC/install.sh")"
+if printf '%s' "$summary_hidden" | grep -qE 'test-panel-key|test-enrollment-key'; then
+  printf 'NACHO_HIDE_INSTALL_SECRETS 未隐藏安装摘要密钥\n' >&2
+  exit 1
+fi
+printf '%s' "$summary_hidden" | grep -qF '面板/API 地址' || {
+  printf '手动隐藏密钥时不应隐藏面板地址\n' >&2
+  exit 1
+}
+
+if [ "$(uname -s)" = "Linux" ]; then
+  printf 'NACHO_ACCESS_INFO_ONCE=1\n' >>"$access_env"
+  summary_first="$(env INSTALL_DIR="$INSTALL_DIR" DATA_DIR="$DATA_DIR" \
+    bash -c 'source "$1"; summary' _ "$DEPLOY_SRC/install.sh")"
+  printf '%s' "$summary_first" | grep -qF 'test-panel-key' || {
+    printf '安装摘要首次一次性展示未列出密钥\n' >&2
+    exit 1
+  }
+  printf '%s' "$summary_first" | grep -qF '一次性展示设置显示' || {
+    printf '安装摘要首次一次性展示缺少提示\n' >&2
+    exit 1
+  }
+  grep -q '^NACHO_ACCESS_INFO_SHOWN=1$' "$access_env" || {
+    printf '安装摘要未记录一次性展示状态\n' >&2
+    exit 1
+  }
+  summary_second="$(env INSTALL_DIR="$INSTALL_DIR" DATA_DIR="$DATA_DIR" \
+    bash -c 'source "$1"; summary' _ "$DEPLOY_SRC/install.sh")"
+  if printf '%s' "$summary_second" | grep -qE 'test-panel-key|test-enrollment-key'; then
+    printf '安装摘要一次性展示后仍泄露密钥\n' >&2
+    exit 1
+  fi
+  printf '%s' "$summary_second" | grep -qF '<服务器地址>' || {
+    printf '安装摘要隐藏状态未使用地址占位符\n' >&2
+    exit 1
+  }
 fi
 
 printf 'napl fixture passed\n'

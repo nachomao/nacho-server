@@ -902,6 +902,7 @@ MAIN_MENU_ITEMS=(
   "backup|备份与恢复|列出、创建或恢复备份"
   "update|升级|检查可用版本或安装升级包"
   "uninstall|卸载|保留数据或彻底删除"
+  "settings|设置|访问信息与一次性展示"
   "exit|退出|返回命令行"
 )
 
@@ -1031,7 +1032,8 @@ menu_item_line() {
 render_menu_frame() {
   local title="$1" cursor="$2"
   shift 2
-  local items=("$@") count=${#items[@]} index=0 item
+  local items=("$@")
+  local count=${#items[@]} index=0 item
   render_banner
   printf '\n%s[ %s ]%s\n\n' "$C_TITLE" "$title" "$C_RESET"
   for item in "${items[@]}"; do
@@ -1239,6 +1241,116 @@ keys_screen() {
   done
 }
 
+# 访问信息中的地址优先使用 PUBLIC_BASE_URL；未配置时按监听端口探测本机地址。
+access_url() {
+  local base host port ip
+  base="$(env_get PUBLIC_BASE_URL)"
+  if [ -n "$base" ]; then
+    printf '%s' "${base%/}"
+    return 0
+  fi
+  host="$(env_get HOST)"
+  port="$(env_get PORT)"
+  port="${port:-8443}"
+  case "$host" in
+    ""|0.0.0.0|::|"[::]")
+      ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+      host="${ip:-127.0.0.1}"
+      ;;
+  esac
+  case "$host" in
+    *:*) host="[$host]" ;;
+  esac
+  printf 'http://%s:%s' "$host" "$port"
+}
+
+# 列出面板地址和密钥；启用一次性展示后，首次查看会立即写入已展示标记。
+show_access_info() {
+  local once shown url panel_key enrollment_key
+  once="$(env_get NACHO_ACCESS_INFO_ONCE)"
+  shown="$(env_get NACHO_ACCESS_INFO_SHOWN)"
+  if [ "$once" = "1" ] && [ "$shown" = "1" ]; then
+    printf '面板/API 地址: 已隐藏\n'
+    printf 'Panel API Key: 已隐藏\n'
+    printf '注册密钥    : 已隐藏\n'
+    printf '说明：已启用一次性展示，访问信息不再显示；该设置无法取消。\n'
+    return 0
+  fi
+  if [ "$once" = "1" ]; then
+    # 先记录再输出，保证一次性设置在异常时也不会退化为可重复查看。
+    env_set NACHO_ACCESS_INFO_SHOWN 1 ||
+      die "$EXIT_VALIDATION" "无法记录一次性展示状态，已取消显示访问信息。"
+  fi
+  url="$(access_url)"
+  panel_key="$(env_get PANEL_API_KEY)"
+  enrollment_key="$(env_get ENROLLMENT_KEY)"
+  printf '面板/API 地址: %s\n' "$url"
+  printf '健康检查    : %s/health\n' "$url"
+  printf 'Panel API Key: %s\n' "${panel_key:-未配置}"
+  printf '注册密钥    : %s\n' "${enrollment_key:-未配置}"
+  printf 'Windows Agent: %s/nacho.ps1\n' "$url"
+  if [ "$once" = "1" ]; then
+    printf '已启用一次性展示：本次为最后一次显示，此后将永久隐藏（无法取消）。\n'
+  else
+    printf '当前每次查看都会显示；可在“设置”中启用一次性展示（启用后无法取消）。\n'
+  fi
+}
+
+enable_access_info_once() {
+  local confirmation
+  if [ "$(env_get NACHO_ACCESS_INFO_ONCE)" = "1" ]; then
+    printf '一次性展示已启用，菜单中无法取消。\n'
+    if [ "$(env_get NACHO_ACCESS_INFO_SHOWN)" = "1" ]; then
+      printf '访问信息已经展示并永久隐藏。\n'
+    else
+      printf '访问信息尚未展示；下次查看后将永久隐藏。\n'
+    fi
+    return 0
+  fi
+  printf '启用后，访问信息（URL 与两个密钥）只再展示一次，之后永久隐藏。\n'
+  printf '该选项在菜单中无法取消，重装摘要同样遵守此设置。\n'
+  printf '输入 ENABLE 确认：'
+  if ! IFS= read -r confirmation; then
+    log "已取消。"
+    return 0
+  fi
+  if [ "$confirmation" != "ENABLE" ]; then
+    log "已取消。"
+    return 0
+  fi
+  env_set NACHO_ACCESS_INFO_ONCE 1 ||
+    die "$EXIT_VALIDATION" "写入一次性展示设置失败。"
+  log "已启用一次性展示，菜单中无法取消。"
+  printf '请在“访问信息”中查看并保存；本次查看后内容将永久隐藏。\n'
+}
+
+settings_screen() {
+  MENU_START_CURSOR=0
+  local once_hint
+  while :; do
+    if [ "$(env_get NACHO_ACCESS_INFO_ONCE)" = "1" ]; then
+      once_hint="已启用，无法取消"
+    else
+      once_hint="仅展示一次；启用后无法取消"
+    fi
+    menu_select "设置" \
+      "access|访问信息|列出面板地址、Panel API Key 与注册密钥" \
+      "once|一次性展示|$once_hint" \
+      "back|返回|" || return 0
+    case "$MENU_RESULT" in
+      access)
+        ( show_access_info ) || warn "访问信息读取失败。"
+        pause_menu
+        ;;
+      once)
+        ( enable_access_info_once ) || warn "一次性展示设置失败。"
+        pause_menu
+        ;;
+      back|*) return 0 ;;
+    esac
+  done
+}
+
 list_backup_files() {
   mkdir -p "$BACKUP_DIR"
   chmod 700 "$BACKUP_DIR"
@@ -1392,6 +1504,7 @@ menu() {
       backup) ( backup_screen ) || warn "备份操作未完成。" ;;
       update) ( update_screen ) || warn "升级操作未完成。" ;;
       uninstall) uninstall_screen ;;
+      settings) ( settings_screen ) || warn "设置操作未完成。" ;;
       exit) return 0 ;;
       *) warn "未知菜单项：$MENU_RESULT" ;;
     esac
@@ -1424,12 +1537,13 @@ main() {
       shift
       case "${1:-}" in check) update_check;; install) shift; install_release "$@";; *) die "$EXIT_USAGE" "用法：napl update check|install [package]";; esac
       ;;
+    access|info) show_access_info ;;
     uninstall) shift; uninstall_command "$@" ;;
     *) die "$EXIT_USAGE" "未知命令：$1" ;;
   esac
 }
 
 # 仅在直接执行时进入主流程；夹具可 source 本文件以测试纯渲染/键位函数。
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+if [ "${BASH_SOURCE[0]:-}" = "$0" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
   main "$@"
 fi

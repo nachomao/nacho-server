@@ -103,7 +103,9 @@ test("Windows 启动器不继承安装管道并脱离父进程", () => {
 test("Linux 安装脚本在隐藏安装密钥时保留真实输出", () => {
   const install = fs.readFileSync(installPath, "utf8")
 
-  assert.match(install, /if \[ "\$\{NACHO_HIDE_INSTALL_SECRETS:-0\}" != "1" \]; then/)
+  assert.match(install, /NACHO_HIDE_INSTALL_SECRETS/)
+  assert.match(install, /hide_keys=1/)
+  assert.match(install, /Panel API Key: 已隐藏/)
 })
 
 test("RunMode 可选参数不在 PowerShell 参数绑定阶段拒绝空值", () => {

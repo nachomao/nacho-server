@@ -303,26 +303,110 @@ open_firewall() {
   fi
 }
 
+env_file_get() {
+  local key="$1" file="${INSTALL_DIR}/.env"
+  [ -f "$file" ] || return 0
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", $0)
+      sub("[[:space:]]+$", "", $0)
+      print $0
+      exit
+    }
+  ' "$file"
+}
+
+env_file_set() {
+  local key="$1" value="$2" file="${INSTALL_DIR}/.env" temp
+  [ -f "$file" ] || return 1
+  temp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced = 0 }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      print key "=" value
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) print key "=" value }
+  ' "$file" >"$temp" || { rm -f "$temp"; return 1; }
+  chmod 640 "$temp"
+  chown --reference="$file" "$temp" 2>/dev/null || { rm -f "$temp"; return 1; }
+  mv -f "$temp" "$file"
+}
+
 summary() {
-  local ip
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  local ip listen_host host port base url once shown hide_keys=0 hide_url=0 one_time=0
+  local panel_key enrollment_key
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  listen_host="$(env_file_get HOST)"; listen_host="${listen_host:-$HOST}"
+  port="$(env_file_get PORT)"; port="${port:-$PORT}"
+  base="$(env_file_get PUBLIC_BASE_URL)"
+  host="$listen_host"
+  case "$host" in
+    ""|0.0.0.0|::|"[::]") host="${ip:-127.0.0.1}" ;;
+  esac
+  case "$host" in
+    *:*) host="[$host]" ;;
+  esac
+  url="${base%/}"
+  if [ -z "$url" ]; then
+    url="http://${host}:${port}"
+  fi
+
+  once="$(env_file_get NACHO_ACCESS_INFO_ONCE)"
+  shown="$(env_file_get NACHO_ACCESS_INFO_SHOWN)"
+  if [ "${NACHO_HIDE_INSTALL_SECRETS:-0}" = "1" ]; then
+    hide_keys=1
+  fi
+  if [ "$once" = "1" ] && [ "$shown" = "1" ]; then
+    hide_keys=1
+    hide_url=1
+  elif [ "$hide_keys" != 1 ] && [ "$once" = "1" ]; then
+    if env_file_set NACHO_ACCESS_INFO_SHOWN 1; then
+      one_time=1
+    else
+      hide_keys=1
+      hide_url=1
+      warn "无法记录一次性展示状态，已隐藏访问信息。"
+    fi
+  fi
+
   echo
   log "部署完成！"
   echo "  服务名称    : ${APP_NAME}.service"
-  echo "  监听地址    : ${HOST}:${PORT}"
+  echo "  监听地址    : ${listen_host}:${port}"
   echo "  安装目录    : ${INSTALL_DIR}"
   echo "  数据目录    : ${DATA_DIR}"
-  if [ "${NACHO_HIDE_INSTALL_SECRETS:-0}" != "1" ]; then
-    echo "  面板 API Key: $(grep '^PANEL_API_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
-    echo "  注册密钥    : $(grep '^ENROLLMENT_KEY=' "${INSTALL_DIR}/.env" | cut -d= -f2-)"
+  if [ "$hide_url" = 1 ]; then
+    echo "  面板/API 地址: 已隐藏（一次性展示）"
+  else
+    echo "  面板/API 地址: ${url}"
+  fi
+  if [ "$hide_keys" = 1 ]; then
+    echo "  Panel API Key: 已隐藏"
+    echo "  注册密钥    : 已隐藏"
+  else
+    panel_key="$(env_file_get PANEL_API_KEY)"
+    enrollment_key="$(env_file_get ENROLLMENT_KEY)"
+    echo "  Panel API Key: ${panel_key:-未配置}"
+    echo "  注册密钥    : ${enrollment_key:-未配置}"
   fi
   echo
-  echo "  健康检查    : curl http://${ip:-127.0.0.1}:${PORT}/health"
-  echo "  Windows Agent: irm http://${ip:-127.0.0.1}:${PORT}/nacho.ps1 | iex"
+  if [ "$hide_url" = 1 ]; then
+    echo "  健康检查    : curl http://<服务器地址>:${port}/health"
+    echo "  Windows Agent: irm http://<服务器地址>:${port}/nacho.ps1 | iex"
+  else
+    echo "  健康检查    : curl ${url}/health"
+    echo "  Windows Agent: irm ${url}/nacho.ps1 | iex"
+  fi
   echo "  查看日志    : journalctl -u ${APP_NAME} -f"
   echo "  重启服务    : systemctl restart ${APP_NAME}"
   echo
-  if [ "${NACHO_HIDE_INSTALL_SECRETS:-0}" != "1" ]; then
+  if [ "$one_time" = 1 ]; then
+    warn "访问信息已按一次性展示设置显示；菜单与后续重装摘要将不再显示。"
+  fi
+  if [ "$hide_keys" != 1 ]; then
     warn "请在面板「设置」中填入上面的 API Key，并在客户端安装时使用注册密钥。"
   fi
 }
@@ -344,4 +428,7 @@ main() {
   summary
 }
 
-main "$@"
+# 仅在直接执行时进入主流程；夹具可 source 本文件以验证安装摘要策略。
+if [ "${BASH_SOURCE[0]:-}" = "$0" ] || [ -z "${BASH_SOURCE[0]:-}" ]; then
+  main "$@"
+fi
