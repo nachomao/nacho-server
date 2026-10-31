@@ -1,6 +1,6 @@
 # nacho-server 项目级开发提示词（AGENTS.md）
 
-> 更新服务器源码在工作区私有 `../nacho-update-server/`，不上 GitHub。服务端与 Agent 同版本源码推送 `nachomao/nacho-server`，在同一次 GitHub Release 发布服务端源码包与 Agent EXE；根目录 `publish-update.ps1` 仅向更新服务器发送签名索引元数据。旧安装实例须人工安装迁移版。
+> 更新服务器源码在工作区私有 `../nacho-update-server/`，不上 GitHub。服务端与 Agent 同版本源码推送 `nachomao/nacho-server`，在同一次 GitHub Release 发布服务端源码包与 Agent EXE；工作区根目录 `publish-update.ps1` 生成并上传 GitHub 制品、回读校验后，仅向更新服务器发送签名索引元数据。旧安装实例须人工安装迁移版。
 
 本文件只约束 `nacho-server` 仓库（服务端 + Windows Agent）。面板前端在独立仓库 `nachomao/nacho-main`，其开发约定不在此文件范围内。
 
@@ -57,7 +57,7 @@
 ### 4.3 部署脚本（`deploy/`）
 
 - `install.sh` / `uninstall.sh` / `napl` 必须保持 **LF 行尾**（见 `.gitattributes`）。云端部署会把它们上传到 Linux 后直接交给 bash strict mode，CRLF 会导致解析失败。
-- `install.sh` 只从脚本上级目录（仓库根）复制 `package.json`、`package-lock.json`、`tsconfig.json`、`src`、`deploy`、`artifacts`，不得引用仓库根以外的路径。
+- `install.sh` 只从脚本上级目录（仓库根）复制 `package.json`、`package-lock.json`、`tsconfig.json`、`src`、`deploy`，并创建空的 `artifacts/windows`；不复制制品，不得引用仓库根以外的路径。
 - `napl` 从 `NACHO_UPDATE_ORIGIN` 读取签名索引；v3 服务端源码制品固定在 `nachomao/nacho-server` GitHub Release，并由面板下载、经 Panel API 分块上传至服务端。`napl update check` 可查询，v3 安装须经独立升级执行器在目标主机构建、验证和回滚；旧 v2 索引保持兼容。
 - `deploy/napl-release-public.pem` 是更新索引及 Linux manifest 的 Ed25519 公钥。当前已规划替换公钥，所有旧实例须先人工安装迁移版，不得直接宣称旧客户端仍可在线升级。
 - `deploy/build-release.mjs` 保留旧式 Linux 预构建包用途；双仓 v3 的源码包由 `publish-update.ps1` 对固定 Git 提交制作，目标 Linux 主机在暂存区以非特权用户安装锁定依赖并构建，不由更新服务器构建。
@@ -75,7 +75,7 @@
 
 | 模式 | 运行位置 | 安装目录 | 管理方式 | 验收命令 |
 |---|---|---|---|---|
-| Windows 本机部署 | 当前 Windows 设备 | 仓库内 `server/`（旧布局） | `deploy/windows/local-control-server.ps1` + 面板本机 API | `Invoke-RestMethod http://127.0.0.1:PORT/health` |
+| Windows 本机部署 | 当前 Windows 设备 | `%LOCALAPPDATA%/NachoPanel/server`（面板从 GitHub 克隆的副本） | `deploy/windows/local-control-server.ps1` + 面板本机 API | `Invoke-RestMethod http://127.0.0.1:PORT/health` |
 | WSL2 部署 | WSL2 `Debian` / `debian` | `/opt/control-server` | `deploy/install.sh` + `control-server.service` | `curl -fsS http://localhost:8443/health` |
 | 独立 Linux 服务器 | 远程 Linux 主机 | `/opt/control-server` | `deploy/install.sh` + `control-server.service` | `curl -fsS http://127.0.0.1:PORT/health` |
 
@@ -100,7 +100,7 @@ npm test
 npm run build
 ```
 
-- `server/node_modules` 若由 Windows npm 安装，其中 `esbuild` 原生包与 Linux 不兼容。WSL 测试使用 WSL 文件系统中的隔离目录：复制 `package*.json`、`tsconfig.json`、`src/`、`deploy/`，执行 `npm ci --no-audit --no-fund`、测试和构建，完成后校验临时路径位于 `/tmp/` 再清理。
+- 本仓库 `node_modules` 若由 Windows npm 安装，其中 `esbuild` 原生包与 Linux 不兼容。WSL 测试使用 WSL 文件系统中的隔离目录：复制 `package*.json`、`tsconfig.json`、`src/`、`deploy/`，执行 `npm ci --no-audit --no-fund`、测试和构建，完成后校验临时路径位于 `/tmp/` 再清理。
 - 服务端测试不直接覆盖 `/opt/control-server`。
 
 ### 7.2 Agent（在 Windows 上运行）
