@@ -511,6 +511,7 @@ const taskSchema = z.object({
   time: z.string(),
   interval: z.number().int().nonnegative(),
   cron: z.string(),
+  timezone: z.string().trim().min(1).max(64).optional(),
   clientIds: z.array(z.string()),
   enabled: z.boolean(),
 })

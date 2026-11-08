@@ -12,6 +12,7 @@ type CommandRow = {
   id: string
   client_id: string
   task_id: string | null
+  run_id: string | null
   type: string
   payload: string
   status: string
@@ -26,6 +27,7 @@ export function mapCommandRow(r: CommandRow): Command {
     id: r.id,
     clientId: r.client_id,
     taskId: r.task_id,
+    runId: r.run_id,
     type: r.type,
     payload: safeParse(r.payload),
     status: r.status as CommandStatus,
@@ -47,6 +49,7 @@ function safeParse(s: string): Record<string, unknown> {
 export type NewCommand = {
   clientId: string
   taskId?: string | null
+  runId?: string | null
   type: string
   payload?: Record<string, unknown>
 }
@@ -58,6 +61,7 @@ export function createCommand(input: NewCommand): Command {
     id: shortId("cmd"),
     clientId: input.clientId,
     taskId: input.taskId ?? null,
+    runId: input.runId ?? null,
     type: input.type,
     payload: input.payload ?? {},
     status: "pending",
@@ -67,10 +71,16 @@ export function createCommand(input: NewCommand): Command {
     updatedAt: now,
   }
   db.prepare(
-    `INSERT INTO commands (id, client_id, task_id, type, payload, status, result, exit_code, created_at, updated_at)
-     VALUES (@id, @clientId, @taskId, @type, @payload, @status, @result, @exitCode, @createdAt, @updatedAt)`,
+    `INSERT INTO commands (id, client_id, task_id, run_id, type, payload, status, result, exit_code, created_at, updated_at)
+     VALUES (@id, @clientId, @taskId, @runId, @type, @payload, @status, @result, @exitCode, @createdAt, @updatedAt)`,
   ).run({ ...cmd, payload: JSON.stringify(cmd.payload) })
   return cmd
+}
+
+/** 查询某个自动调度运行已为客户端创建的命令，供失败重试时复用。 */
+export function getTaskRunCommand(runId: string, clientId: string): Command | null {
+  const row = db.prepare("SELECT * FROM commands WHERE run_id = ? AND client_id = ?").get(runId, clientId) as CommandRow | undefined
+  return row ? mapCommandRow(row) : null
 }
 
 /** 投递已持久化的命令并写入脱敏审计摘要。 */

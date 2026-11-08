@@ -10,6 +10,7 @@ import { agentRouter } from "./routes/agent"
 import { artifactRouter } from "./routes/artifacts"
 import { panelRouter } from "./routes/panel"
 import { recordLog } from "./services/logs"
+import { startTaskScheduler, stopTaskScheduler } from "./services/task-scheduler"
 import { syncAgentRelease } from "./services/agent-release-sync"
 import { attachWebSocket } from "./ws"
 
@@ -86,6 +87,7 @@ setInterval(() => {
 server.listen(config.port, config.host, () => {
   logger.info(`Nacho 服务端已启动：http://${config.host}:${config.port}（${config.nodeEnv}）`)
   recordLog("info", "server", "服务端启动完成", `port=${config.port}`)
+  startTaskScheduler()
 })
 
 // 只准备受签名索引约束的制品；向设备下发仍由管理员手动确认。
@@ -100,6 +102,7 @@ let shuttingDown = false
 function shutdown(signal: string) {
   if (shuttingDown) return
   shuttingDown = true
+  stopTaskScheduler()
   logger.info(`收到 ${signal}，正在关闭服务端...`)
   server.close(() => {
     db.close()

@@ -59,6 +59,11 @@ export function initSchema() {
       cron        TEXT NOT NULL DEFAULT '',
       client_ids  TEXT NOT NULL DEFAULT '[]',
       enabled     INTEGER NOT NULL DEFAULT 1,
+      timezone    TEXT NOT NULL DEFAULT 'UTC',
+      next_run_at INTEGER,
+      last_run_at INTEGER,
+      last_status TEXT,
+      last_error  TEXT,
       created_at  INTEGER NOT NULL,
       updated_at  INTEGER NOT NULL
     );
@@ -67,6 +72,7 @@ export function initSchema() {
       id          TEXT PRIMARY KEY,
       client_id   TEXT NOT NULL,
       task_id     TEXT,
+      run_id      TEXT,
       type        TEXT NOT NULL,
       payload     TEXT NOT NULL DEFAULT '{}',
       status      TEXT NOT NULL DEFAULT 'pending',
@@ -76,6 +82,24 @@ export function initSchema() {
       updated_at  INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_commands_client ON commands(client_id, status);
+
+    CREATE TABLE IF NOT EXISTS task_runs (
+      id             TEXT PRIMARY KEY,
+      task_id        TEXT NOT NULL,
+      scheduled_for  INTEGER NOT NULL,
+      status         TEXT NOT NULL DEFAULT 'pending',
+      attempts       INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER,
+      target_ids     TEXT NOT NULL DEFAULT '[]',
+      command_ids    TEXT NOT NULL DEFAULT '[]',
+      error          TEXT,
+      created_at     INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL,
+      finished_at    INTEGER,
+      UNIQUE(task_id, scheduled_for),
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_runs_due ON task_runs(status, next_attempt_at);
 
     CREATE TABLE IF NOT EXISTS managed_artifacts (
       id                 TEXT PRIMARY KEY,
@@ -236,6 +260,12 @@ export function initSchema() {
   `)
   // 旧库补列：CREATE TABLE IF NOT EXISTS 不会为已存在的表添加新字段
   ensureColumn("clients", "os_name", "TEXT NOT NULL DEFAULT ''")
+  ensureColumn("tasks", "timezone", "TEXT NOT NULL DEFAULT 'UTC'")
+  ensureColumn("tasks", "next_run_at", "INTEGER")
+  ensureColumn("tasks", "last_run_at", "INTEGER")
+  ensureColumn("tasks", "last_status", "TEXT")
+  ensureColumn("tasks", "last_error", "TEXT")
+  ensureColumn("commands", "run_id", "TEXT")
   ensureColumn("health_findings", "package_id", "TEXT")
   ensureColumn("notifications", "dismissed", "INTEGER NOT NULL DEFAULT 0")
   ensureColumn("notifications", "source_id", "TEXT")
@@ -262,6 +292,8 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_health_findings_package ON health_findings(package_id);
     CREATE INDEX IF NOT EXISTS idx_notifications_source ON notifications(type, source_id);
     CREATE INDEX IF NOT EXISTS idx_notifications_group ON notifications(group_key, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(enabled, next_run_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_commands_run_client ON commands(run_id, client_id) WHERE run_id IS NOT NULL;
   `)
   if (ensureColumn("install_profiles", "active_revision", "INTEGER NOT NULL DEFAULT 1")) {
     db.exec("UPDATE install_profiles SET active_revision = revision")

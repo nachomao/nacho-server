@@ -225,6 +225,8 @@ napl uninstall purge                # 确认后彻底删除
 | GET/POST/PUT/DELETE | `/install-profiles[/:id]` | 安装档案、默认档案与乐观锁更新 |
 | GET/POST | `/install-profiles/:id/revisions[...]` | 安装档案历史与恢复 |
 
+计划任务的 `daily` / `weekly` / `cron` 触发器由服务端调度器自动下发：`timezone` 使用 IANA 时区名（缺省 `UTC`），任务记录会返回 `nextRunAt`、`lastRunAt`、`lastStatus` 与 `lastError`。调度运行单独记录在 `task_runs`，服务重启后只补齐一次错过排期，按运行 ID 复用已创建命令避免重复投递；下发异常自动重试最多 3 次。`logon` / `startup` / `boot` 属于客户端事件触发，不参与服务端定时排期。
+
 ### 客户端 API（`/agent`）
 
 | 方法 | 路径 | 鉴权 | 说明 |

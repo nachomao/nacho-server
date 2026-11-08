@@ -36,6 +36,8 @@ export type ClientMetrics = {
 export type TaskOS = "windows" | "linux"
 export type TriggerId = "daily" | "weekly" | "logon" | "startup" | "boot" | "cron"
 
+export type TaskRunStatus = "success" | "failed" | "retrying" | null
+
 export type ScheduledTask = {
   id: string
   name: string
@@ -47,8 +49,16 @@ export type ScheduledTask = {
   time: string
   interval: number
   cron: string
+  /** 任务时区（IANA 名称），用于解释 time / cron 与显示下次执行时间 */
+  timezone: string
   clientIds: string[]
   enabled: boolean
+  /** 服务端自动调度：下一次计划执行时间；事件类触发器或停用任务为 null */
+  nextRunAt: number | null
+  /** 最近一次自动或手动下发时间 */
+  lastRunAt: number | null
+  lastStatus: TaskRunStatus
+  lastError: string | null
   createdAt: number
   updatedAt: number
 }
@@ -60,6 +70,8 @@ export type Command = {
   id: string
   clientId: string
   taskId: string | null
+  /** 计划任务自动调度时关联的一次运行记录；手动命令为 null */
+  runId: string | null
   /** 指令类型，例如 run-program / restart / collect-logs / install-plugin */
   type: string
   payload: Record<string, unknown>
