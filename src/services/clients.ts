@@ -6,6 +6,7 @@ import { makeToken, shortId } from "../lib/ids"
 import type { Client, ClientMetrics, ClientOS, ClientStatus } from "../types"
 import { recordLog } from "./logs"
 import { isClientConnected, removeConnection } from "./realtime"
+import { getGeneralSettings } from "./settings"
 
 type ClientRow = {
   id: string
@@ -60,12 +61,13 @@ function normalizeMetrics(metrics: ClientMetrics): ClientMetrics {
 /** 根据心跳时间与存储状态计算实时在线状态 */
 function computeStatus(r: ClientRow): ClientStatus {
   if (r.status === "unregistered") return "unregistered"
+  const thresholdMs = getGeneralSettings().offlineThreshold * 1000
   if (r.status === "warning") {
     // 告警状态下仍要判断是否已离线
-    if (Date.now() - r.last_seen > config.offlineThreshold * 1000) return "offline"
+    if (Date.now() - r.last_seen > thresholdMs) return "offline"
     return "warning"
   }
-  if (Date.now() - r.last_seen > config.offlineThreshold * 1000) return "offline"
+  if (Date.now() - r.last_seen > thresholdMs) return "offline"
   return "online"
 }
 

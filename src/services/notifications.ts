@@ -1,6 +1,7 @@
 import { db } from "../db"
-import { config } from "../config"
 import { markRead as markHealthRead, markAllRead as markAllHealthRead } from "./health"
+import { getGeneralSettings, getNotifyConditions } from "./settings"
+import type { ClientMetrics } from "../types"
 
 export type NotificationSeverity = "info" | "warning" | "error" | "critical"
 export type NotificationType = "offline" | "health" | "task" | "log"
@@ -15,6 +16,44 @@ type LogRow = { id: string; ts: number; level: string; source: string; message: 
 
 const now = () => Date.now()
 const severityOf = (value: unknown): NotificationSeverity => value === "critical" || value === "error" || value === "info" ? value : "warning"
+
+const timeFormatters = new Map<string, Intl.DateTimeFormat>()
+function formatNotificationTime(ts: number): string {
+  const timeZone = getGeneralSettings().timezone
+  let formatter = timeFormatters.get(timeZone)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("zh-CN", {
+      timeZone,
+      hour12: false,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+    timeFormatters.set(timeZone, formatter)
+  }
+  return formatter.format(new Date(ts))
+}
+
+/** 免打扰时段固定为每日 23:00–07:00，按系统设置时区计算。 */
+export function isQuietHours(
+  at = Date.now(),
+  conditions = getNotifyConditions(),
+  timeZone = getGeneralSettings().timezone,
+): boolean {
+  if (!conditions.quietHours) return false
+  const hour = Number(
+    new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", hourCycle: "h23" }).format(new Date(at)),
+  )
+  return hour >= 23 || hour < 7
+}
+
+/** 静默时段仅记录不推送，严重告警始终放行。 */
+export function isNotificationSuppressed(severity: NotificationSeverity, at = Date.now()): boolean {
+  return severity !== "critical" && isQuietHours(at)
+}
 const logSeverityOf = (level: string): NotificationSeverity => level === "error" ? "critical" : level === "warn" ? "warning" : "info"
 const text = (v: unknown) => typeof v === "string" ? v : ""
 function resultDetail(result: string | null, exitCode: number | null): string {
@@ -34,24 +73,77 @@ function map(row: Row): Notification {
   const ts = Number(row.ts) || now()
   return { id: text(row.id), type: text(row.type) as NotificationType, severity: severityOf(row.severity), title: text(row.title),
     desc: text(row.description), detail: text(row.detail) || text(row.description), code: row.code == null ? null : text(row.code),
-    source: text(row.source) || "server", deviceId: row.device_id == null ? null : text(row.device_id), time: new Date(ts).toLocaleString("zh-CN", { hour12: false }),
+    source: text(row.source) || "server", deviceId: row.device_id == null ? null : text(row.device_id), time: formatNotificationTime(ts),
     ts, read: Number(row.read) === 1, snoozedUntil: row.snoozed_until == null ? null : Number(row.snoozed_until), groupKey: text(row.group_key) || `${text(row.type)}:${text(row.source_id)}` }
 }
-function insert(n: { id: string; type: NotificationType; severity: NotificationSeverity; title: string; desc: string; detail?: string; code?: string | null; source?: string; deviceId?: string | null; ts?: number; sourceId?: string | null; groupKey: string }) {
-  db.prepare(`INSERT OR IGNORE INTO notifications (id,type,severity,title,description,detail,code,source,device_id,group_key,ts,read,dismissed,source_id,snoozed_until)
+function insert(n: { id: string; type: NotificationType; severity: NotificationSeverity; title: string; desc: string; detail?: string; code?: string | null; source?: string; deviceId?: string | null; ts?: number; sourceId?: string | null; groupKey: string }): boolean {
+  // 静默时段不落通知，来源数据仍保留；时段结束后下一次同步会重新物化。
+  if (isNotificationSuppressed(n.severity, now())) return false
+  const info = db.prepare(`INSERT OR IGNORE INTO notifications (id,type,severity,title,description,detail,code,source,device_id,group_key,ts,read,dismissed,source_id,snoozed_until)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,NULL)`).run(n.id, n.type, n.severity, n.title, n.desc, (n.detail ?? n.desc).slice(0, 65536), n.code ?? null, n.source ?? "server", n.deviceId ?? null, n.groupKey, n.ts ?? now(), 0, n.sourceId ?? null)
+  return Number(info.changes) > 0
 }
 function syncSources() {
   const ts = now()
-  const clients = db.prepare("SELECT id,name,hostname,last_seen FROM clients WHERE status!='unregistered' AND last_seen > 0 AND last_seen <= ?").all(ts-config.offlineThreshold*1000) as Array<{id:string;name:string;hostname:string;last_seen:number}>
-  for (const c of clients) { const label = c.name || c.hostname || c.id; insert({ id:`offline:${c.id}:${c.last_seen}`, type:"offline", severity:"error", title:"客户端已离线", desc:`${label} 未在预期时间内上报心跳`, detail:`设备 ${label} 在 ${new Date(c.last_seen).toLocaleString("zh-CN", {hour12:false})} 后失去心跳。`, code:"CLIENT_OFFLINE", source:"clients", deviceId:c.id, sourceId:c.id, groupKey:`device:${c.id}:offline`, ts:c.last_seen || ts }) }
+  const conditions = getNotifyConditions()
+  if (conditions.clientOffline) {
+    const offlineThresholdMs = getGeneralSettings().offlineThreshold * 1000
+    const clients = db.prepare("SELECT id,name,hostname,last_seen FROM clients WHERE status!='unregistered' AND last_seen > 0 AND last_seen <= ?").all(ts-offlineThresholdMs) as Array<{id:string;name:string;hostname:string;last_seen:number}>
+    for (const c of clients) { const label = c.name || c.hostname || c.id; insert({ id:`offline:${c.id}:${c.last_seen}`, type:"offline", severity:"error", title:"客户端已离线", desc:`${label} 未在预期时间内上报心跳`, detail:`设备 ${label} 在 ${formatNotificationTime(c.last_seen)} 后失去心跳。`, code:"CLIENT_OFFLINE", source:"clients", deviceId:c.id, sourceId:c.id, groupKey:`device:${c.id}:offline`, ts:c.last_seen || ts }) }
+  }
   const findings = db.prepare("SELECT hf.id,hf.host,hf.severity,hf.category,hf.title,hf.detail,hf.ts,hf.read,hf.package_id,lp.client_id FROM health_findings hf LEFT JOIN log_packages lp ON lp.id=hf.package_id WHERE hf.severity IN ('critical','error','warning')").all() as Array<{id:string;host:string;severity:string;category:string;title:string;detail:string;ts:number;read:number;package_id:string|null;client_id:string|null}>
   for (const f of findings) { insert({ id:`health:${f.id}`, type:"health", severity:severityOf(f.severity), title:f.title, desc:`${f.host}${f.detail ? `：${f.detail}` : ""}`, detail:f.detail || f.title, code:f.category, source:"health", deviceId:f.client_id, sourceId:f.id, groupKey:`health:${f.category}:${f.host}:${f.title}`, ts:f.ts }); if (f.read) db.prepare("UPDATE notifications SET read=1 WHERE id=?").run(`health:${f.id}`) }
-  const failures = db.prepare("SELECT c.id,c.updated_at,c.client_id,c.result,c.exit_code,t.id AS task_id,t.name AS task_name FROM commands c LEFT JOIN tasks t ON t.id=c.task_id WHERE c.status='failed'").all() as Array<{id:string;updated_at:number;client_id:string;result:string|null;exit_code:number|null;task_id:string|null;task_name:string|null}>
-  for (const f of failures) insert({ id:`task:${f.id}`, type:"task", severity:"error", title:"任务执行失败", desc:`${f.task_name || "命令"} 在客户端 ${f.client_id} 上执行失败`, detail:resultDetail(f.result,f.exit_code), code:f.exit_code == null ? "TASK_FAILED" : `EXIT_${f.exit_code}`, source:"tasks", deviceId:f.client_id, sourceId:f.id, groupKey:`task:${f.task_id || f.task_name || "unknown"}:${f.client_id}:${f.exit_code ?? "failed"}`, ts:f.updated_at || ts })
+  if (conditions.taskFailed) {
+    const failures = db.prepare("SELECT c.id,c.updated_at,c.client_id,c.result,c.exit_code,t.id AS task_id,t.name AS task_name FROM commands c LEFT JOIN tasks t ON t.id=c.task_id WHERE c.status='failed'").all() as Array<{id:string;updated_at:number;client_id:string;result:string|null;exit_code:number|null;task_id:string|null;task_name:string|null}>
+    for (const f of failures) insert({ id:`task:${f.id}`, type:"task", severity:"error", title:"任务执行失败", desc:`${f.task_name || "命令"} 在客户端 ${f.client_id} 上执行失败`, detail:resultDetail(f.result,f.exit_code), code:f.exit_code == null ? "TASK_FAILED" : `EXIT_${f.exit_code}`, source:"tasks", deviceId:f.client_id, sourceId:f.id, groupKey:`task:${f.task_id || f.task_name || "unknown"}:${f.client_id}:${f.exit_code ?? "failed"}`, ts:f.updated_at || ts })
+  }
   const logs = db.prepare("SELECT id,ts,level,source,message,detail FROM logs ORDER BY ts DESC LIMIT 100").all() as LogRow[]
   for (const log of logs) insert({ id:`log:${log.id}`, type:"log", severity:logSeverityOf(log.level), title:log.message, desc:log.source, detail:log.detail || log.message, code:`LOG_${log.level.toUpperCase()}`, source:log.source, deviceId:logDeviceId(log.detail), sourceId:log.id, groupKey:`log:${log.source}:${log.message}`.slice(0, 240), ts:log.ts })
 }
+const activeMetricAlerts = new Set<string>()
+
+/** 心跳携带资源指标时按通知条件与阈值产生/撤销资源告警。 */
+export function evaluateClientMetrics(
+  client: { id: string; name: string; hostname: string },
+  metrics: ClientMetrics | null | undefined,
+  at = now(),
+): void {
+  if (!metrics) return
+  const conditions = getNotifyConditions()
+  const checks = [
+    { key: "cpu", label: "CPU 使用率", enabled: conditions.cpuAlert, threshold: conditions.cpuThreshold, value: metrics.cpu },
+    { key: "memory", label: "内存使用率", enabled: conditions.memAlert, threshold: conditions.memThreshold, value: metrics.memory },
+    { key: "disk", label: "磁盘使用率", enabled: conditions.diskAlert, threshold: conditions.diskThreshold, value: metrics.disk },
+  ] as const
+  const label = client.name || client.hostname || client.id
+  for (const check of checks) {
+    const alertKey = `${client.id}:${check.key}`
+    const exceeded = check.enabled && Number.isFinite(check.value) && check.value >= check.threshold
+    if (exceeded) {
+      if (activeMetricAlerts.has(alertKey)) continue
+      const value = Math.round(check.value)
+      const inserted = insert({
+        id: `metric:${check.key}:${client.id}:${at}`,
+        type: "health",
+        severity: "warning",
+        title: `${check.label}超过阈值`,
+        desc: `${label} 当前${check.label} ${value}%，阈值 ${check.threshold}%`,
+        detail: `设备 ${label} 最近一次心跳上报的${check.label}为 ${value}%，超过设置的 ${check.threshold}% 告警阈值。`,
+        code: `METRIC_${check.key.toUpperCase()}`,
+        source: "metrics",
+        deviceId: client.id,
+        sourceId: `${client.id}:${check.key}`,
+        groupKey: `metric:${client.id}:${check.key}`,
+        ts: at,
+      })
+      if (inserted) activeMetricAlerts.add(alertKey)
+    } else if (activeMetricAlerts.delete(alertKey)) {
+      // 指标恢复或条件关闭后撤销当前告警；再次越界会重新通知。
+      deleteBySource("health", `${client.id}:${check.key}`)
+    }
+  }
+}
+
 function tx<T>(fn:()=>T):T { db.exec("BEGIN IMMEDIATE"); try { const v=fn(); db.exec("COMMIT"); return v } catch(e){ db.exec("ROLLBACK"); throw e } }
 function purge(retentionDays=30, maxItems=500, enabled=true) { if (!enabled) return; const days=Math.max(1,Math.min(90,retentionDays)); const max=Math.max(100,Math.min(1000,maxItems)); db.prepare("UPDATE notifications SET dismissed=1 WHERE dismissed=0 AND read=1 AND ts < ?").run(now()-days*86400000); const active=Number((db.prepare("SELECT COUNT(*) AS count FROM notifications WHERE dismissed=0").get() as {count:number}).count); const excess=Math.max(0,active-max); if(excess>0) db.prepare("UPDATE notifications SET dismissed=1 WHERE id IN (SELECT id FROM notifications WHERE dismissed=0 AND read=1 ORDER BY ts ASC LIMIT ?)").run(excess) }
 export function purgeRead(retentionDays=30) { return Number(db.prepare("UPDATE notifications SET dismissed=1,read=1 WHERE dismissed=0 AND (read=1 OR ts < ?)").run(now()-Math.max(1,Math.min(90,retentionDays))*86400000).changes) }

@@ -12,6 +12,7 @@ import {
 import type { Command, ScheduledTask, TaskOS, TaskRunStatus, TriggerId } from "../types"
 import { dispatchCommand, getTaskRunCommand } from "./commands"
 import { recordLog } from "./logs"
+import { getGeneralSettings } from "./settings"
 
 type TaskRow = {
   id: string
@@ -98,7 +99,8 @@ export type TaskInput = {
 }
 
 function scheduleOf(input: Pick<TaskInput, "triggerId" | "time" | "interval" | "cron" | "timezone">): ScheduleDefinition {
-  const timezone = normalizeTimeZone(input.timezone || DEFAULT_TASK_TIMEZONE)
+  // 未显式指定时区时使用系统设置中的服务端时区。
+  const timezone = normalizeTimeZone(input.timezone || getGeneralSettings().timezone || DEFAULT_TASK_TIMEZONE)
   if (!timezone) throw new HttpError(400, "时区无效，请使用 IANA 时区名（例如 Asia/Shanghai）")
   const schedule: ScheduleDefinition = {
     triggerId: input.triggerId,

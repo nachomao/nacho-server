@@ -3,13 +3,16 @@ import { shortId } from "../lib/ids"
 import { isRecurringTrigger, nextTaskRunAt } from "../lib/schedule"
 import type { Command, ScheduledTask } from "../types"
 import { recordLog } from "./logs"
+import { getGeneralSettings } from "./settings"
 import { cancelRunPendingCommands, dispatchTaskForRun, getTask, markTaskRun } from "./tasks"
 
 /** 调度器扫描间隔；单个 tick 内同步处理到期任务与重试队列。 */
 export const TASK_SCHEDULER_TICK_MS = 15_000
-export const TASK_RUN_MAX_ATTEMPTS = 3
 /** 进程在运行中崩溃后，超过该时长仍未收尾的运行会被重新排队。 */
 export const TASK_RUN_STALE_MS = 2 * 60_000
+/** 已结束运行记录保留时长（自动清理开启时生效）。 */
+export const TASK_RUN_RETENTION_MS = 30 * 86_400_000
+const CLEANUP_INTERVAL_MS = 60 * 60_000
 const MAX_RUNS_PER_TICK = 50
 
 type TaskRunState = "pending" | "running" | "retrying" | "success" | "failed" | "skipped"
@@ -48,6 +51,24 @@ function describeError(error: unknown): string {
 export function retryDelayMs(attempt: number): number {
   const safeAttempt = Math.max(1, Math.floor(attempt))
   return Math.min(5 * 60_000, 30_000 * 2 ** (safeAttempt - 1))
+}
+
+/** 自动下发最多尝试次数 = 首次 + 系统设置中的重试次数（默认 2 次重试，共 3 次）。 */
+function maxDispatchAttempts(): number {
+  const retryCount = Math.min(10, Math.max(0, Math.floor(getGeneralSettings().retryCount)))
+  return retryCount + 1
+}
+
+/**
+ * 清理已正常结束的历史运行记录（成功/跳过），失败记录保留用于审计。
+ * 仅在「自动清理已完成任务」开启时生效。
+ */
+export function cleanupFinishedTaskRuns(now = Date.now()): number {
+  if (!getGeneralSettings().autoCleanTasks) return 0
+  const info = db.prepare(
+    "DELETE FROM task_runs WHERE status IN ('success', 'skipped') AND finished_at IS NOT NULL AND finished_at < ?",
+  ).run(now - TASK_RUN_RETENTION_MS)
+  return Number(info.changes)
 }
 
 function finishRun(
@@ -174,6 +195,7 @@ function processPendingRuns(now: number, dispatcher: RunDispatcher): number {
     }
 
     const targetIds = parseArray(run.target_ids)
+    const maxAttempts = maxDispatchAttempts()
     try {
       const commands = dispatcher(task, targetIds, run.id)
       if (commands.length === 0) {
@@ -194,7 +216,7 @@ function processPendingRuns(now: number, dispatcher: RunDispatcher): number {
       )
     } catch (error) {
       const message = describeError(error)
-      if (attempts < TASK_RUN_MAX_ATTEMPTS) {
+      if (attempts < maxAttempts) {
         const delay = retryDelayMs(attempts)
         db.prepare(
           "UPDATE task_runs SET status = 'retrying', next_attempt_at = ?, error = ?, updated_at = ? WHERE id = ?",
@@ -225,11 +247,18 @@ function processPendingRuns(now: number, dispatcher: RunDispatcher): number {
  * 执行一次调度扫描：恢复超时运行、把到期任务加入运行队列、处理待执行/待重试运行。
  * 通过 unique(task_id, scheduled_for) 与 runId 命令唯一约束防止重复投递。
  */
+let lastCleanupAt = 0
+
 export function runTaskSchedulerTick(now = Date.now(), dispatcher: RunDispatcher = dispatchTaskForRun): void {
   initializeMissingSchedules(now)
   recoverTaskRuns(now)
   enqueueDueTasks(now)
   processPendingRuns(now, dispatcher)
+  if (now - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
+    lastCleanupAt = now
+    const removed = cleanupFinishedTaskRuns(now)
+    if (removed > 0) recordLog("info", "task", `已清理 ${removed} 条历史任务运行记录`)
+  }
 }
 
 let schedulerTimer: NodeJS.Timeout | null = null

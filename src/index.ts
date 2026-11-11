@@ -9,7 +9,8 @@ import { logger } from "./lib/logger"
 import { agentRouter } from "./routes/agent"
 import { artifactRouter } from "./routes/artifacts"
 import { panelRouter } from "./routes/panel"
-import { recordLog } from "./services/logs"
+import { recordLog, sweepLogRetention } from "./services/logs"
+import { getGeneralSettings } from "./services/settings"
 import { startTaskScheduler, stopTaskScheduler } from "./services/task-scheduler"
 import { syncAgentRelease } from "./services/agent-release-sync"
 import { attachWebSocket } from "./ws"
@@ -75,7 +76,7 @@ attachWebSocket(server)
 // 周期性把超时未心跳的客户端标记为离线
 const OFFLINE_SWEEP_MS = 15_000
 setInterval(() => {
-  const threshold = Date.now() - config.offlineThreshold * 1000
+  const threshold = Date.now() - getGeneralSettings().offlineThreshold * 1000
   const info = db
     .prepare("UPDATE clients SET status = 'offline' WHERE status NOT IN ('offline', 'unregistered') AND last_seen < ? AND last_seen > 0")
     .run(threshold)
@@ -83,6 +84,15 @@ setInterval(() => {
     logger.info(`已将 ${info.changes} 台超时客户端标记为离线`)
   }
 }, OFFLINE_SWEEP_MS).unref()
+
+// 日志保留策略即使在没有新日志写入时也按小时生效。
+setInterval(() => {
+  try {
+    sweepLogRetention()
+  } catch (error) {
+    logger.warn("日志保留清理失败：", error)
+  }
+}, 60 * 60_000).unref()
 
 server.listen(config.port, config.host, () => {
   logger.info(`Nacho 服务端已启动：http://${config.host}:${config.port}（${config.nodeEnv}）`)

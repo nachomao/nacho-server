@@ -1,7 +1,38 @@
-import { config } from "../config"
 import { db } from "../db"
 import { shortId } from "../lib/ids"
 import type { LogEntry, LogLevel } from "../types"
+import { getGeneralSettings } from "./settings"
+
+const MIN_LOG_RETENTION_MAX = 1000
+const MAX_LOG_RETENTION_MAX = 1_000_000
+const RETENTION_SWEEP_INTERVAL_MS = 60 * 60_000
+let lastRetentionSweep = 0
+
+function retentionMax(): number {
+  const configured = getGeneralSettings().logRetentionMax
+  return Math.min(MAX_LOG_RETENTION_MAX, Math.max(MIN_LOG_RETENTION_MAX, Math.floor(configured)))
+}
+
+/** 按条目上限淘汰最旧日志，返回删除条数。 */
+function trimExcessLogs(): number {
+  const max = retentionMax()
+  const count = (db.prepare("SELECT COUNT(*) AS c FROM logs").get() as { c: number }).c
+  if (count <= max) return 0
+  const overflow = count - max
+  return Number(db.prepare("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts ASC LIMIT ?)").run(overflow).changes)
+}
+
+/** 按保留天数与条目上限清理日志；天数为 0 时只按条目上限裁剪。 */
+export function sweepLogRetention(now = Date.now()): number {
+  const days = getGeneralSettings().logRetentionDays
+  let removed = 0
+  if (days > 0) {
+    removed += Number(db.prepare("DELETE FROM logs WHERE ts < ?").run(now - days * 86_400_000).changes)
+  }
+  removed += trimExcessLogs()
+  lastRetentionSweep = now
+  return removed
+}
 
 type LogRow = {
   id: string
@@ -46,12 +77,9 @@ export function recordLog(level: LogLevel, source: string, message: string, deta
     detail: detail ?? null,
   }
   getInsertStmt().run(entry)
-  // 按保留上限裁剪最旧日志
-  const count = (db.prepare("SELECT COUNT(*) AS c FROM logs").get() as { c: number }).c
-  if (count > config.logRetentionMax) {
-    const overflow = count - config.logRetentionMax
-    db.prepare("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts ASC LIMIT ?)").run(overflow)
-  }
+  // 每次写入都按条目上限裁剪；按天数的清理每小时最多执行一次，避免频繁全表扫描。
+  trimExcessLogs()
+  if (Date.now() - lastRetentionSweep >= RETENTION_SWEEP_INTERVAL_MS) sweepLogRetention()
   return entry
 }
 

@@ -3,10 +3,29 @@ import { shortId } from "../lib/ids"
 import type { Command, CommandStatus } from "../types"
 import { recordLog } from "./logs"
 import { pushToClient } from "./realtime"
+import { getGeneralSettings } from "./settings"
 import { listProcessesResultSchema, manageLocalUserResultSchema, manageRegistryResultSchema, manageServiceResultSchema, openUrlResultSchema, restartProcessResultSchema, setProcessEfficiencyResultSchema, showMessageResultSchema } from "../schemas/commands"
 import { createHash } from "node:crypto"
 
 export const MAX_COMMAND_RESULT_BYTES = 512 * 1024
+/** Agent run-program 契约允许的超时上限；设置值超出时按此截断。 */
+const MAX_RUN_PROGRAM_TIMEOUT_SECONDS = 900
+
+function commandConcurrency(): number {
+  return Math.min(64, Math.max(1, Math.floor(getGeneralSettings().concurrency)))
+}
+
+/** 正在执行（已确认或运行中）的指令数；pending 不计入，避免断线重投时占满并发。 */
+function activeCommandCount(clientId: string): number {
+  const row = db
+    .prepare("SELECT COUNT(*) AS count FROM commands WHERE client_id = ? AND status IN ('sent', 'running')")
+    .get(clientId) as { count: number }
+  return Number(row.count)
+}
+
+function availableSlots(clientId: string): number {
+  return Math.max(0, commandConcurrency() - activeCommandCount(clientId))
+}
 
 type CommandRow = {
   id: string
@@ -57,13 +76,21 @@ export type NewCommand = {
 /** 只持久化命令；批量业务可先原子创建关联记录，再统一投递。 */
 export function createCommand(input: NewCommand): Command {
   const now = Date.now()
+  const payload = { ...(input.payload ?? {}) }
+  // 未单独指定超时的程序任务使用系统设置中的默认命令超时。
+  if (input.type === "run-program" && payload.timeoutSeconds === undefined) {
+    payload.timeoutSeconds = Math.min(
+      MAX_RUN_PROGRAM_TIMEOUT_SECONDS,
+      Math.max(1, Math.floor(getGeneralSettings().commandTimeout)),
+    )
+  }
   const cmd: Command = {
     id: shortId("cmd"),
     clientId: input.clientId,
     taskId: input.taskId ?? null,
     runId: input.runId ?? null,
     type: input.type,
-    payload: input.payload ?? {},
+    payload,
     status: "pending",
     result: null,
     exitCode: null,
@@ -83,9 +110,11 @@ export function getTaskRunCommand(runId: string, clientId: string): Command | nu
   return row ? mapCommandRow(row) : null
 }
 
-/** 投递已持久化的命令并写入脱敏审计摘要。 */
-export function deliverCommand(cmd: Command): void {
-  pushToClient(cmd.clientId, { kind: "command", command: cmd })
+/** 投递已持久化的命令并写入脱敏审计摘要；并发已满时只入队等待。 */
+export function deliverCommand(cmd: Command): boolean {
+  const delivered = availableSlots(cmd.clientId) > 0
+    ? pushToClient(cmd.clientId, { kind: "command", command: cmd })
+    : false
   const input = { type: cmd.type, payload: cmd.payload }
   const action = input.type === "manage-local-user" && typeof input.payload?.action === "string"
     ? `;action=${input.payload.action}`
@@ -103,6 +132,7 @@ export function deliverCommand(cmd: Command): void {
       })()
     : ""
   recordLog("info", "command", `向客户端 ${cmd.clientId} 下发指令 ${cmd.type}`, `commandId=${cmd.id}${action}${registryAction}${messageSummary}${openUrlSummary}`)
+  return delivered
 }
 
 /**
@@ -116,12 +146,28 @@ export function dispatchCommand(input: NewCommand): Command {
   return cmd
 }
 
-/** 客户端拉取待执行指令；收到 ACK 前保持 pending，允许断线重投。 */
+/** 客户端拉取待执行指令；按系统设置中的并发上限只返回当前可执行的条数。 */
 export function pullPending(clientId: string): Command[] {
+  const limit = availableSlots(clientId)
+  if (limit <= 0) return []
   const rows = db
-    .prepare("SELECT * FROM commands WHERE client_id = ? AND status = 'pending' ORDER BY created_at ASC")
-    .all(clientId) as CommandRow[]
+    .prepare("SELECT * FROM commands WHERE client_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?")
+    .all(clientId, limit) as CommandRow[]
   return rows.map(mapCommandRow)
+}
+
+/** 并发槽位释放后，把仍在排队的 pending 指令推给在线客户端。 */
+export function deliverPending(clientId: string): number {
+  const limit = availableSlots(clientId)
+  if (limit <= 0) return 0
+  const rows = db
+    .prepare("SELECT * FROM commands WHERE client_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT ?")
+    .all(clientId, limit) as CommandRow[]
+  let delivered = 0
+  for (const row of rows) {
+    if (pushToClient(clientId, { kind: "command", command: mapCommandRow(row) })) delivered += 1
+  }
+  return delivered
 }
 
 /** 客户端持久化指令后确认接收（pending -> sent），重复确认保持幂等。 */
@@ -261,6 +307,8 @@ export function reportResult(id: string, clientId: string, status: CommandStatus
     } catch { return false }
   }
   updateStatus(id, status, result, exitCode)
+  // 终态释放并发槽位，继续投递该客户端排队中的指令。
+  if (status !== "running") deliverPending(clientId)
   if (row.type === "collect-logs" && status !== "running") {
     // 延迟加载避免 health -> commands 的模块初始化环；未关联健康包时该函数保持空操作。
     const health = require("./health") as typeof import("./health")

@@ -9,7 +9,6 @@ import * as logs from "../services/logs"
 import { getOverview } from "../services/overview"
 import * as plugins from "../services/plugins"
 import * as settings from "../services/settings"
-import { isOpenEnrollmentEnabled } from "../lib/auth"
 import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
 import * as productUpdates from "../services/product-updates"
@@ -723,19 +722,17 @@ panelRouter.get(
 /* ==================== 设置 ==================== */
 panelRouter.get(
   "/settings",
-  asyncHandler((_req, res) => {
-    const stored = settings.getSettings() ?? {}
-    const security = stored.security
-    const savedSecurity = security && typeof security === "object" && !Array.isArray(security) ? security : {}
-    return ok(res, { ...stored, security: { ...savedSecurity, openEnrollment: isOpenEnrollmentEnabled() } })
-  }),
+  asyncHandler((_req, res) => ok(res, settings.getEffectiveSettings())),
 )
 
 panelRouter.put(
   "/settings",
   asyncHandler((req, res) => {
     const body = parseBody(z.record(z.unknown()), req.body)
-    return ok(res, settings.saveSettings(body))
+    const updated = settings.mergeSettings(body)
+    // 只记录变更的分组名，绝不把 SMTP 密码等设置值写入日志。
+    logs.recordLog("info", "settings", "系统设置已更新", `sections=${Object.keys(body).sort().join(",") || "none"}`)
+    return ok(res, updated)
   }),
 )
 

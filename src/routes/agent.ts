@@ -9,6 +9,7 @@ import * as commands from "../services/commands"
 import { MAX_COMMAND_RESULT_BYTES } from "../services/commands"
 import * as health from "../services/health"
 import * as managedArtifacts from "../services/managed-artifacts"
+import * as notifications from "../services/notifications"
 import { recordLog } from "../services/logs"
 import { checkEnrollmentAttempt } from "../services/enrollment-guard"
 
@@ -132,6 +133,7 @@ agentRouter.post(
     const body = parseBody(metricsSchema, req.body ?? {})
     const c = clients.heartbeat(clientId, body.metrics, clientIp(req), body.version, body.osName)
     if (!c) return fail(res, "客户端不存在", 404)
+    if (body.metrics) notifications.evaluateClientMetrics(c, body.metrics)
     // 心跳响应带上待执行指令数，客户端可据此决定是否立即拉取
     const pending = commands.listCommands(clientId).filter((cmd) => cmd.status === "pending").length
     return ok(res, { client: c, pendingCommands: pending, serverTime: Date.now() })

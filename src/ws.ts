@@ -5,7 +5,26 @@ import { db } from "./db"
 import { logger } from "./lib/logger"
 import * as clientsSvc from "./services/clients"
 import * as commands from "./services/commands"
+import * as notifications from "./services/notifications"
 import { registerConnection, removeConnection } from "./services/realtime"
+import { getGeneralSettings } from "./services/settings"
+import type { ClientMetrics } from "./types"
+
+const LIVENESS_SWEEP_MS = 5_000
+
+function parseMetrics(value: unknown): ClientMetrics | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (!["cpu", "memory", "disk", "uptime"].every((key) => typeof record[key] === "number" && Number.isFinite(record[key]))) {
+    return undefined
+  }
+  return {
+    cpu: record.cpu as number,
+    memory: record.memory as number,
+    disk: record.disk as number,
+    uptime: record.uptime as number,
+  }
+}
 
 /**
  * 客户端实时长连接：
@@ -15,6 +34,7 @@ import { registerConnection, removeConnection } from "./services/realtime"
  */
 export function attachWebSocket(server: Server) {
   const wss = new WebSocketServer({ noServer: true })
+  const lastPongAt = new WeakMap<WebSocket, number>()
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url || "", "http://localhost")
@@ -38,6 +58,8 @@ export function attachWebSocket(server: Server) {
 
   wss.on("connection", (ws: WebSocket, clientId: string) => {
     registerConnection(clientId, ws)
+    lastPongAt.set(ws, Date.now())
+    ws.on("pong", () => lastPongAt.set(ws, Date.now()))
     clientsSvc.heartbeat(clientId)
 
     // 上线后立即推送积压的待执行指令
@@ -54,9 +76,12 @@ export function attachWebSocket(server: Server) {
         return
       }
       switch (msg.kind) {
-        case "heartbeat":
-          clientsSvc.heartbeat(clientId, msg.metrics as never)
+        case "heartbeat": {
+          const metrics = parseMetrics(msg.metrics)
+          const client = clientsSvc.heartbeat(clientId, metrics)
+          if (client && metrics) notifications.evaluateClientMetrics(client, metrics)
           break
+        }
         case "result": {
           const { id, status, result, exitCode } = msg as {
             id: string
@@ -85,6 +110,26 @@ export function attachWebSocket(server: Server) {
     ws.on("close", () => removeConnection(clientId, ws))
     ws.on("error", (err) => logger.warn(`客户端 ${clientId} 连接错误：`, err))
   })
+
+  // 主通道心跳超时：按系统设置中的 channelTimeout 终止无响应的连接。
+  const livenessTimer = setInterval(() => {
+    const timeoutMs = getGeneralSettings().channelTimeout * 1000
+    const at = Date.now()
+    for (const ws of wss.clients) {
+      const lastAt = lastPongAt.get(ws) ?? at
+      if (at - lastAt > timeoutMs) {
+        logger.warn(`实时通道超过 ${Math.round(timeoutMs / 1000)} 秒无心跳响应，终止连接`)
+        ws.terminate()
+        continue
+      }
+      try {
+        ws.ping()
+      } catch {
+        /* 连接正在关闭，交由 close 事件回收 */
+      }
+    }
+  }, LIVENESS_SWEEP_MS)
+  livenessTimer.unref()
 
   logger.info("WebSocket 实时通道已挂载：/agent/ws")
 }
