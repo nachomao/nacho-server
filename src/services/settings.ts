@@ -10,7 +10,7 @@ import { DEFAULT_TASK_TIMEZONE, normalizeTimeZone } from "../lib/schedule"
  */
 
 const DEFAULT_KEY = "app"
-const SECTION_NAMES = ["general", "email", "conditions", "security"] as const
+const SECTION_NAMES = ["general", "email", "conditions", "security", "updates"] as const
 type SectionName = (typeof SECTION_NAMES)[number]
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"])
 
@@ -60,16 +60,40 @@ export type SecuritySettings = {
   openEnrollment: boolean
 }
 
+export type UpdateSettings = {
+  origin: string
+}
+
 export type AppSettings = {
   general: GeneralSettings
   email: EmailSettings
   conditions: NotifyConditions
   security: SecuritySettings
+  updates: UpdateSettings
 } & Record<string, unknown>
 
 function clampInt(value: number, min: number, max: number, fallback: number): number {
   if (!Number.isFinite(value)) return fallback
   return Math.min(max, Math.max(min, Math.round(value)))
+}
+
+const UPDATE_ORIGIN_PATTERN = /^https:\/\/[a-z0-9.-]+(?::\d+)?$/i
+const UPDATE_ORIGIN_PLACEHOLDER = "https://updates.example.invalid"
+
+/** 规范化更新源：空字符串表示未配置，非法值返回 null。 */
+export function normalizeUpdateOrigin(value: string): string | null {
+  const trimmed = value.trim().replace(/\/+$/, "")
+  if (!trimmed) return ""
+  if (trimmed.toLowerCase() === UPDATE_ORIGIN_PLACEHOLDER) return null
+  if (!UPDATE_ORIGIN_PATTERN.test(trimmed)) return null
+  try {
+    const url = new URL(trimmed)
+    if (url.protocol !== "https:" || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) return null
+    return url.origin
+  } catch {
+    return null
+  }
 }
 
 /** 默认值：容量/离线阈值沿用环境变量，其余按面板默认值。 */
@@ -116,6 +140,9 @@ export function defaultSettings(): AppSettings {
       forceHttps: false,
       loginLockout: true,
       openEnrollment: config.allowOpenEnrollment,
+    },
+    updates: {
+      origin: normalizeUpdateOrigin(config.updateOrigin) || "",
     },
   }
 }
@@ -177,11 +204,29 @@ const securityFieldSchemas = {
   openEnrollment: z.boolean(),
 } satisfies FieldSchemaMap
 
+const updateOriginSchema = z
+  .string()
+  .trim()
+  .max(255)
+  .transform((value, ctx) => {
+    const normalized = normalizeUpdateOrigin(value)
+    if (normalized === null) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "更新源必须是有效的 HTTPS 源" })
+      return z.NEVER
+    }
+    return normalized
+  })
+
+const updateFieldSchemas = {
+  origin: updateOriginSchema,
+} satisfies FieldSchemaMap
+
 const sectionSchemas: Record<SectionName, FieldSchemaMap> = {
   general: generalFieldSchemas,
   email: emailFieldSchemas,
   conditions: conditionFieldSchemas,
   security: securityFieldSchemas,
+  updates: updateFieldSchemas,
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -235,12 +280,15 @@ export function getEffectiveSettings(): AppSettings {
   if (cached) return cached
   const defaults = defaultSettings()
   const stored = getSettings() ?? {}
+  const updates = sanitizeSection("updates", defaults.updates, stored.updates)
   cached = {
     ...stored,
     general: sanitizeSection("general", defaults.general, stored.general),
     email: sanitizeSection("email", defaults.email, stored.email),
     conditions: sanitizeSection("conditions", defaults.conditions, stored.conditions),
     security: sanitizeSection("security", defaults.security, stored.security),
+    // 空 origin 表示未配置，生效值回退到环境变量；来源由 resolveUpdateOrigin 区分。
+    updates: { ...updates, origin: updates.origin || defaults.updates.origin },
   }
   return cached
 }
@@ -288,6 +336,28 @@ export function mergeSettings(patch: Record<string, unknown>): AppSettings {
   }
   saveSettings(next)
   return getEffectiveSettings()
+}
+
+export type ResolvedUpdateOrigin = {
+  origin: string | null
+  source: "panel" | "env" | "none"
+}
+
+/** 原始持久化中的非空更新源；不做环境变量回退，用于区分来源。 */
+export function storedUpdateOrigin(): string | null {
+  const raw = getSettings()
+  const updates = raw?.updates
+  if (!isPlainObject(updates) || typeof updates.origin !== "string") return null
+  return normalizeUpdateOrigin(updates.origin) || null
+}
+
+/** 更新源读取语义：面板持久化非空优先，其次回退 NACHO_UPDATE_ORIGIN。 */
+export function resolveUpdateOrigin(): ResolvedUpdateOrigin {
+  const stored = storedUpdateOrigin()
+  if (stored) return { origin: stored, source: "panel" }
+  const env = normalizeUpdateOrigin(config.updateOrigin)
+  if (env) return { origin: env, source: "env" }
+  return { origin: null, source: "none" }
 }
 
 /** 返回面板持久化的免密注册策略；未保存时回退到传入的环境变量默认值。 */

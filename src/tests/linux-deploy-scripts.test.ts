@@ -228,6 +228,13 @@ test("卸载脚本按单元文件判断服务，避免 pipefail 下的 SIGPIPE �
   assert.match(uninstall, /systemctl daemon-reload/)
 })
 
+test("install.sh 迁移保留数据目录、SQLite 与已有 Agent 制品", () => {
+  assert.match(install, /mkdir -p "\$\{INSTALL_DIR\}" "\$\{DATA_DIR\}"/)
+  assert.match(install, /mkdir -p "\$\{INSTALL_DIR\}\/artifacts\/windows"/)
+  assert.doesNotMatch(install, /rm -rf[^\n]*(DATA_DIR|artifacts|\.env)/)
+  assert.doesNotMatch(install, /cp -r[^\n]*artifacts/)
+})
+
 test("install.sh validates NACHO_UPDATE_ORIGIN and writes or backfills .env without overwriting existing values", () => {
   assert.match(install, /NACHO_UPDATE_ORIGIN="\$\{NACHO_UPDATE_ORIGIN:-\}"/)
   assert.match(install, /\^https:\/\/\[a-zA-Z0-9\.-\]\+\(:\\\[0-9\]\+\)\?\$|\^https:\/\/\[a-zA-Z0-9\.-\]\+\(\:\[0-9\]\+\)\?\$/)

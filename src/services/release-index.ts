@@ -2,12 +2,34 @@ import { verify, type KeyObject } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { config } from "../config"
+import { resolveUpdateOrigin as resolveSettingsUpdateOrigin } from "./settings"
 
-export const UPDATE_ORIGIN = process.env.NACHO_UPDATE_ORIGIN || "https://updates.example.invalid"
-export const RELEASE_INDEX_URL = `${UPDATE_ORIGIN}/updates/index.json`
 export const RELEASE_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEA2qjcjfU4N2/nMmD9XkemMqqq6P0K6OVfjAnwlBJDU1g=
 -----END PUBLIC KEY-----`
+
+/** 当前生效的更新源：面板持久化优先，其次 NACHO_UPDATE_ORIGIN。 */
+export function resolveUpdateOrigin(): string | null {
+  return resolveSettingsUpdateOrigin().origin
+}
+
+function requireUpdateOrigin(): string {
+  const origin = resolveUpdateOrigin()
+  if (!origin) throw new Error("未配置更新源，请在面板“设置 → 更新”中设置，或配置 NACHO_UPDATE_ORIGIN")
+  return origin
+}
+
+function cacheFilePath() {
+  return path.join(path.dirname(config.databasePath), "release-index-cache-recommended.json")
+}
+
+const cacheReaders = new Set<() => void>()
+
+/** 面板保存新 origin 后清空所有读者的内存缓存与磁盘缓存。 */
+export function invalidateReleaseIndexCache(): void {
+  for (const invalidate of cacheReaders) invalidate()
+  fs.rmSync(cacheFilePath(), { force: true })
+}
 
 export type ReleaseComponent = "panel" | "server" | "agent"
 export type ReleaseEntry = {
@@ -90,11 +112,9 @@ function normalizeV3(index: Record<string, unknown>): ReleaseIndex {
     },
   } as ReleaseIndex
 }
-export function indexUrl(sequence?: number) {
+export function indexUrl(sequence?: number, origin = requireUpdateOrigin()) {
   if (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 1)) throw new Error("推荐索引序号无效")
-  if (UPDATE_ORIGIN === "https://updates.example.invalid") throw new Error("请先配置独立更新服务器的 NACHO_UPDATE_ORIGIN")
-  if (!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(UPDATE_ORIGIN)) throw new Error("更新服务器 HTTPS 地址无效")
-  return sequence === undefined ? RELEASE_INDEX_URL : `${UPDATE_ORIGIN}/updates/revisions/${sequence}/index.json`
+  return sequence === undefined ? `${origin}/updates/index.json` : `${origin}/updates/revisions/${sequence}/index.json`
 }
 const FILE: Record<ReleaseComponent, RegExp> = {
   panel: /^NachoPanel-Setup-\d+\.\d+\.\d+\.exe$/,
@@ -112,7 +132,7 @@ export function compareReleaseVersions(left: string, right: string): number {
   return 0
 }
 
-function validateEntry(component: ReleaseComponent, value: unknown): ReleaseEntry {
+function validateEntry(component: ReleaseComponent, value: unknown, origin: string): ReleaseEntry {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${component} 发布信息无效`)
   const item = value as Record<string, unknown>
   const expectedName = component === "panel"
@@ -127,7 +147,7 @@ function validateEntry(component: ReleaseComponent, value: unknown): ReleaseEntr
       typeof item.publishedAt !== "string" || !Number.isFinite(Date.parse(item.publishedAt))) {
     throw new Error(`${component} 发布信息无效`)
   }
-  const expected = `${UPDATE_ORIGIN}/artifacts/${component}/${item.version}/${item.sha256}/${item.fileName}`
+  const expected = `${origin}/artifacts/${component}/${item.version}/${item.sha256}/${item.fileName}`
   if (item.url !== expected) throw new Error(`${component} 下载地址不在固定发布路径`)
   if (typeof item.title !== "string" || !item.title.trim() ||
       typeof item.notes !== "string" || !item.notes.trim() ||
@@ -143,7 +163,7 @@ function validateEntry(component: ReleaseComponent, value: unknown): ReleaseEntr
     const win = item.windows as Record<string, unknown> | undefined
     const fileName = `control-server-${item.version}-win-x64.zip`
     if (!win || win.fileName !== fileName ||
-        win.url !== `${UPDATE_ORIGIN}/artifacts/server/${item.version}/${win.sha256}/${fileName}` ||
+        win.url !== `${origin}/artifacts/server/${item.version}/${win.sha256}/${fileName}` ||
         typeof win.sha256 !== "string" || !SHA.test(win.sha256) ||
         !Number.isSafeInteger(win.sizeBytes) || Number(win.sizeBytes) < 1 || Number(win.sizeBytes) > MAX_ARTIFACT_BYTES) {
       throw new Error("Windows 服务端发布信息无效")
@@ -152,7 +172,7 @@ function validateEntry(component: ReleaseComponent, value: unknown): ReleaseEntr
   return item as ReleaseEntry
 }
 
-export function verifyReleaseIndex(bytes: Buffer, signature: Buffer, publicKey: string | KeyObject = RELEASE_PUBLIC_KEY): ReleaseIndex {
+export function verifyReleaseIndex(bytes: Buffer, signature: Buffer, publicKey: string | KeyObject = RELEASE_PUBLIC_KEY, origin?: string): ReleaseIndex {
   if (!bytes.length || bytes.length > MAX_INDEX_BYTES || signature.length !== 64 ||
       !verify(null, bytes, publicKey, signature)) throw new Error("发布索引签名无效")
   const parsed: unknown = JSON.parse(bytes.toString("utf8"))
@@ -166,7 +186,8 @@ export function verifyReleaseIndex(bytes: Buffer, signature: Buffer, publicKey: 
       !index.releases || typeof index.releases !== "object" || Array.isArray(index.releases)) throw new Error("发布索引格式无效")
   const releases = index.releases as Record<string, unknown>
   if (index.schemaVersion === 3 || index.schemaVersion === 4) return normalizeV3(index)
-  for (const name of ["panel", "server", "agent"] as const) validateEntry(name, releases[name])
+  const fixedOrigin = origin ?? requireUpdateOrigin()
+  for (const name of ["panel", "server", "agent"] as const) validateEntry(name, releases[name], fixedOrigin)
   return index as ReleaseIndex
 }
 
@@ -188,31 +209,48 @@ async function download(url: string, maxBytes: number): Promise<{ bytes: Buffer;
 }
 
 export function createReleaseIndexReader(publicKey: string | KeyObject = RELEASE_PUBLIC_KEY) {
-  let memory: { index: ReleaseIndex; checkedAt: number } | null = null
-  const cacheFile = () => path.join(path.dirname(config.databasePath), "release-index-cache-recommended.json")
+  let memory: { index: ReleaseIndex; checkedAt: number; origin: string } | null = null
   let checking: Promise<{ index: ReleaseIndex; stale: boolean }> | null = null
+  let generation = 0
+  const invalidate = () => {
+    memory = null
+    checking = null
+    generation += 1
+  }
+  cacheReaders.add(invalidate)
   function getReleaseIndex(force = false, sequence?: number): Promise<{ index: ReleaseIndex; stale: boolean }> {
     if (sequence !== undefined) return loadReleaseIndex(force, sequence)
     if (checking) return checking
-    checking = loadReleaseIndex(force).finally(() => { checking = null })
-    return checking
+    const tracked = loadReleaseIndex(force).finally(() => {
+      if (checking === tracked) checking = null
+    })
+    checking = tracked
+    return tracked
   }
   async function loadReleaseIndex(force = false, sequence?: number): Promise<{ index: ReleaseIndex; stale: boolean }> {
-    if (sequence === undefined && !force && memory && Date.now() - memory.checkedAt < 60_000) return { index: memory.index, stale: false }
+    const origin = requireUpdateOrigin()
+    const startGeneration = generation
+    if (sequence === undefined && !force && memory && memory.origin === origin &&
+        Date.now() - memory.checkedAt < 60_000) return { index: memory.index, stale: false }
     let old: ReleaseIndex | null = null
     try {
-      const cached = JSON.parse(fs.readFileSync(cacheFile(), "utf8")) as { bytes: string; signature: string }
-      old = verifyReleaseIndex(Buffer.from(cached.bytes, "base64"), Buffer.from(cached.signature, "base64"), publicKey)
-      if (old.schemaVersion !== 4) old = null
-    } catch { /* 损坏或不存在的缓存不可用于升级 */ }
+      const cached = JSON.parse(fs.readFileSync(cacheFilePath(), "utf8")) as {
+        origin?: string; bytes: string; signature: string
+      }
+      // 跨 origin 的缓存不可复用，否则会把旧更新源的索引当成新配置的结果。
+      if (cached.origin === origin) {
+        old = verifyReleaseIndex(Buffer.from(cached.bytes, "base64"), Buffer.from(cached.signature, "base64"), publicKey, origin)
+        if (old.schemaVersion !== 4) old = null
+      }
+    } catch { /* 损坏、过期或跨 origin 的缓存不可用于升级 */ }
     try {
-      const remote = await download(indexUrl(sequence), MAX_INDEX_BYTES)
+      const remote = await download(indexUrl(sequence, origin), MAX_INDEX_BYTES)
       const match = /^\/updates\/revisions\/([1-9]\d*)\/index\.json$/.exec(new URL(remote.url).pathname)
-      if (new URL(remote.url).origin !== UPDATE_ORIGIN || !match ||
+      if (new URL(remote.url).origin !== origin || !match ||
           (sequence !== undefined && Number(match[1]) !== sequence)) throw new Error("推荐索引固定地址无效")
       const bytes = remote.bytes
       const { bytes: signature } = await download(`${remote.url}.sig`, 128)
-      const index = verifyReleaseIndex(bytes, signature, publicKey)
+      const index = verifyReleaseIndex(bytes, signature, publicKey, origin)
       if (index.schemaVersion !== 4 || index.sequence !== Number(match[1])) throw new Error("推荐索引序号或协议无效")
       if (sequence !== undefined) return { index, stale: false }
       if (old && (index.sequence < old.sequence ||
@@ -227,13 +265,18 @@ export function createReleaseIndexReader(publicKey: string | KeyObject = RELEASE
           throw new Error(`${component} 同版本内容变化`)
         }
       }
-      fs.mkdirSync(path.dirname(cacheFile()), { recursive: true })
-      fs.writeFileSync(`${cacheFile()}.tmp`, JSON.stringify({ bytes: bytes.toString("base64"), signature: signature.toString("base64") }))
-      fs.renameSync(`${cacheFile()}.tmp`, cacheFile())
-      memory = { index, checkedAt: Date.now() }
+      // 失效发生在请求过程中时丢弃结果，避免旧 origin 的索引写回缓存。
+      if (generation !== startGeneration) throw new Error("更新源已变更，请重新检查更新")
+      fs.mkdirSync(path.dirname(cacheFilePath()), { recursive: true })
+      fs.writeFileSync(`${cacheFilePath()}.tmp`, JSON.stringify({
+        origin, bytes: bytes.toString("base64"), signature: signature.toString("base64"),
+      }))
+      fs.renameSync(`${cacheFilePath()}.tmp`, cacheFilePath())
+      memory = { index, checkedAt: Date.now(), origin }
       return { index, stale: false }
     } catch (error) {
-      memory = null
+      if (generation !== startGeneration) throw new Error("更新源已变更，请重新检查更新")
+      if (memory?.origin === origin) memory = null
       if (sequence === undefined && old && error instanceof Error &&
           /HTTP|fetch|网络|超时|timed out|abort/i.test(error.message)) return { index: old, stale: true }
       throw error

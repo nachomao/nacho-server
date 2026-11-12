@@ -49,6 +49,7 @@ export const config = {
         : path.join(path.dirname(databasePath), "health-artifacts"),
   offlineThreshold: num(process.env.OFFLINE_THRESHOLD, 60),
   logRetentionMax: num(process.env.LOG_RETENTION_MAX, 100_000),
+  updateOrigin: (process.env.NACHO_UPDATE_ORIGIN || "").trim(),
   localControlToken: process.env.LOCAL_CONTROL_TOKEN || "",
   nodeEnv: process.env.NODE_ENV || "development",
 }

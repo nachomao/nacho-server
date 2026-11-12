@@ -4,7 +4,8 @@
   "minAgentVersion": "1.0.0",
   "features": {
     "productUpdates": "0.2.4",
-    "agentUpdates": "0.1.0"
+    "agentUpdates": "0.1.0",
+    "updateSourceManagement": "0.4.1"
   },
   "routes": [
     { "prefix": "/product-updates/channel", "methods": ["POST"], "minPanelVersion": "0.1.4" },

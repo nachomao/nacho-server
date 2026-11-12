@@ -12,6 +12,7 @@ import * as settings from "../services/settings"
 import * as tasks from "../services/tasks"
 import * as agentUpdates from "../services/agent-updates"
 import * as productUpdates from "../services/product-updates"
+import { invalidateReleaseIndexCache } from "../services/release-index"
 import * as updateStaging from "../services/update-staging"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
 import { createTerminalSessionSchema } from "../schemas/webssh"
@@ -799,8 +800,11 @@ panelRouter.put(
   asyncHandler((req, res) => {
     const body = parseBody(z.record(z.unknown()), req.body)
     const updated = settings.mergeSettings(body)
-    // 只记录变更的分组名，绝不把 SMTP 密码等设置值写入日志。
-    logs.recordLog("info", "settings", "系统设置已更新", `sections=${Object.keys(body).sort().join(",") || "none"}`)
+    if ("updates" in body) invalidateReleaseIndexCache()
+    // 只记录分组名；updates 额外记录非密钥的 origin，绝不记录 SMTP 密码等其他设置值。
+    const sections = Object.keys(body).sort().join(",") || "none"
+    const origin = "updates" in body ? ` origin=${updated.updates.origin || "(empty)"}` : ""
+    logs.recordLog("info", "settings", "系统设置已更新", `sections=${sections}${origin}`)
     return ok(res, updated)
   }),
 )

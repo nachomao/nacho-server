@@ -164,9 +164,18 @@ napl uninstall purge                # 确认后彻底删除
 
 推荐索引 `schemaVersion=4` 使用全局 `sequence`，`panel`、`server` 各有 `releaseType`，Agent 沿用服务端类型。`GET /updates/index.json` 重定向至不可变 `/updates/revisions/<sequence>/index.json`，`.sig` 必须读取同一次发布的地址。旧 `update-channel.json`、`NACHO_UPDATE_CHANNEL` 不影响默认更新；仅显式 `NAPL_LEGACY_CHANNEL` 保留旧 v2/v3 检查入口。
 
-`GET /api/panel/runtime-info` 返回 `updateMode`、`updateSourceConfigured`、`updateExecutorProtocol`。旧频道写接口返回迁移提示，不再保存频道；更新写接口要求面板至少 0.2.4。创建上传会话必须提交 `{kind, version, sequence}`，服务端独立验签固定索引，并核对目标仍被推荐。上传期间只有面板发布变化可以继续提交；服务端／Agent 目标变化需重新确认。缓存只供展示，Agent 不会自动下发。
+`GET /api/panel/runtime-info` 返回 `updateMode`、`updateSourceConfigured`、`updateSource`、`updateSourceOrigin`（`panel`/`env`/`none`）、`capabilities.updateSourceManagement` 与 `updateExecutorProtocol`。旧频道写接口返回迁移提示，不再保存频道；更新写接口要求面板至少 0.2.4。创建上传会话必须提交 `{kind, version, sequence}`，服务端独立验签固定索引，并核对目标仍被推荐。上传期间只有面板发布变化可以继续提交；服务端／Agent 目标变化需重新确认。缓存只供展示，Agent 不会自动下发。
 
-旧安装需人工安装迁移版本、在原 `.env` 配置 `NACHO_UPDATE_ORIGIN` 的 HTTPS 根地址，并以原安装参数重新运行 `deploy/install.sh`，迁移 root 拥有的 `/usr/local/lib/nacho-updater` 副本。仅替换 Node 服务源码不能迁移独立执行器。后续受信升级会在健康检查通过后更新执行器副本。迁移应先备份原配置和数据库，保持已有凭据及数据；未配置时继续保持更新不可用。
+### 更新源管理与一次性迁移
+
+- **面板是唯一管理入口，服务端是持久化与验签主体**：`PUT /api/panel/settings` 提交 `{ "updates": { "origin": "https://maojiu.cc" } }` 后，origin 写入 SQLite 设置；面板关闭或离线时服务端继续使用最后一次持久化的 origin 完成索引校验、Agent 制品准备和服务端升级检查。
+- **读取顺序**：`settings.updates.origin` 非空优先（`updateSourceOrigin=panel`）；否则回退 `NACHO_UPDATE_ORIGIN`（`env`）；两者都无效为 `none`。`.env` 只保留为首次安装、无面板或 headless 部署的 bootstrap 回退，不再是唯一来源。
+- **校验与缓存**：origin 只接受 `https://域名[:端口]`，拒绝 `http://`、路径、查询、凭据、占位地址与无效端口；保存新 origin 会清空内存与磁盘索引缓存，跨 origin 的缓存不会复用。索引仍必须通过 Ed25519 验签，并校验固定 GitHub 制品地址、大小与 SHA-256。
+- **版本矩阵**：
+  - `1.1.24`：没有设置分组与面板管理 API，只能按下方一次性迁移步骤处理；旧面板不会声称可管理。
+  - `1.2.0`：支持 `NACHO_UPDATE_ORIGIN`，但没有 `updateSourceManagement` 能力；面板只保存本地并提示升级服务端。
+  - `1.2.1+`：面板可写 `updates.origin`，设置优先于 `.env`，`.env` 继续作为 bootstrap/headless 回退。
+- **1.1.24 一次性迁移**：先备份 `/opt/control-server/.env` 与 `/var/lib/control-server/control.db`；用 `1.2.1` 源码以原安装参数运行 `deploy/install.sh`，并传入 `NACHO_UPDATE_ORIGIN=https://maojiu.cc`；安装器保留既有 `.env` 其他字段、SQLite、Agent token、journal 与制品，仅补充缺失的 `NACHO_UPDATE_ORIGIN`；随后核对 `systemctl is-active control-server`、`/health` 与 `runtime-info.updateSourceConfigured=true`。迁移还会更新 root 拥有的 `/usr/local/lib/nacho-updater` 执行器副本；仅替换 Node 服务源码不能迁移独立执行器。失败时按备份恢复 `.env`、数据库与服务。
 
 ---
 
@@ -187,6 +196,7 @@ napl uninstall purge                # 确认后彻底删除
 | `DATABASE_PATH` | SQLite 文件路径 | `./data/nacho.db` |
 | `CORS_ORIGIN` | 允许的面板来源，`*` 或逗号分隔 | `*` |
 | `LOCAL_CONTROL_TOKEN` | 可选的 loopback 优雅关闭令牌；本机管理器自动生成 | 空 |
+| `NACHO_UPDATE_ORIGIN` | 独立更新服务器 HTTPS 根地址；未通过面板保存 `updates.origin` 时作为回退（bootstrap/headless） | 空 |
 
 ---
 

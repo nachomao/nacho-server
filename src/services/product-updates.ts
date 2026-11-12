@@ -4,7 +4,8 @@ import path from "node:path"
 import { config } from "../config"
 import { agentArtifactVersion, syncAgentRelease } from "./agent-release-sync"
 import * as clients from "./clients"
-import { compareReleaseVersions, getReleaseIndex, UPDATE_ORIGIN, type UpdateChannel } from "./release-index"
+import { compareReleaseVersions, getReleaseIndex, type UpdateChannel } from "./release-index"
+import { resolveUpdateOrigin } from "./settings"
 
 const packageInfo = JSON.parse(fs.readFileSync(path.join(config.rootDir, "package.json"), "utf8")) as { version: string }
 const compatibility = JSON.parse(fs.readFileSync(path.join(config.rootDir, "deploy", "compatibility.json"), "utf8")) as {
@@ -25,17 +26,25 @@ export function runtimeInfo() {
       status !== null && ["healthy", "failed"].includes((status as { phase?: string }).phase || "")))) {
     status = { phase: "queued", version: null, at: new Date().toISOString() }
   }
+  const updateSource = resolveUpdateOrigin()
   return {
     version: packageInfo.version,
     apiVersion: compatibility.apiVersion,
     minPanelVersion: compatibility.minPanelVersion,
     minAgentVersion: compatibility.minAgentVersion,
-    capabilities: { agentUpdates: true, productUpdates: true, featureMinimums: compatibility.features },
+    capabilities: {
+      agentUpdates: true,
+      productUpdates: true,
+      updateSourceManagement: true,
+      featureMinimums: compatibility.features,
+    },
     agentArtifactVersion: agentArtifactVersion(),
     updateExecutor: process.platform === "linux" && fs.existsSync("/etc/systemd/system/control-server-updater.path"),
     updateStatus: status,
     updateMode: "recommended",
-    updateSourceConfigured: /^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(UPDATE_ORIGIN) && UPDATE_ORIGIN !== "https://updates.example.invalid",
+    updateSourceConfigured: updateSource.origin !== null,
+    updateSource: updateSource.origin,
+    updateSourceOrigin: updateSource.source,
     updateExecutorProtocol: (() => {
       try { return fs.readFileSync("/usr/local/lib/nacho-updater/execute-update.mjs", "utf8").includes("schemaVersion === 4") ? 4 : 3 }
       catch { return null }
