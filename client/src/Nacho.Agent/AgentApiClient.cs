@@ -175,9 +175,13 @@ public sealed class AgentApiClient : IManagedArtifactDownloader, IDisposable
         return socket;
     }
 
-    public Uri WebSocketUri()
+    public Uri WebSocketUri() => WebSocketUri("/agent/ws");
+
+    public Uri WebSocketUri(string pathAndQuery)
     {
-        var builder = new UriBuilder(_http.BaseAddress!) { Scheme = _http.BaseAddress!.Scheme == "https" ? "wss" : "ws", Path = "/agent/ws" };
+        var baseAddress = _http.BaseAddress ?? throw new InvalidOperationException("Agent server URL is not configured.");
+        var target = new Uri(baseAddress, pathAndQuery);
+        var builder = new UriBuilder(target) { Scheme = baseAddress.Scheme == "https" ? "wss" : "ws" };
         return builder.Uri;
     }
 

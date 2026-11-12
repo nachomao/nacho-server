@@ -13,10 +13,15 @@ import { recordLog, sweepLogRetention } from "./services/logs"
 import { getGeneralSettings } from "./services/settings"
 import { startTaskScheduler, stopTaskScheduler } from "./services/task-scheduler"
 import { syncAgentRelease } from "./services/agent-release-sync"
+import * as fileSessions from "./services/file-sessions"
+import * as terminalSessions from "./services/terminal-sessions"
 import { attachWebSocket } from "./ws"
 
 // 初始化数据库
 initSchema()
+// 上次进程异常退出时遗留的 WebSSH 会话无法恢复，启动时统一标记为中断。
+terminalSessions.markStaleTerminalSessions()
+fileSessions.markStaleFileSessions()
 
 const app = express()
 app.disable("x-powered-by")
@@ -114,6 +119,8 @@ function shutdown(signal: string) {
   shuttingDown = true
   stopTaskScheduler()
   logger.info(`收到 ${signal}，正在关闭服务端...`)
+  terminalSessions.shutdownTerminalSessions()
+  fileSessions.shutdownFileSessions()
   server.close(() => {
     db.close()
     process.exit(0)

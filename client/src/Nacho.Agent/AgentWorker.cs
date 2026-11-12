@@ -10,6 +10,8 @@ public sealed class AgentWorker(
     CommandProcessor processor,
     WindowsMetrics metrics,
     AgentPaths paths,
+    TerminalSessionManager terminalManager,
+    FileSessionManager fileManager,
     IOptions<AgentOptions> options,
     ILogger<AgentWorker> logger) : BackgroundService
 {
@@ -88,11 +90,21 @@ public sealed class AgentWorker(
             {
                 using var document = JsonDocument.Parse(message.ToArray());
                 var root = document.RootElement;
-                if (root.TryGetProperty("kind", out var kind) && kind.GetString() == "command" &&
-                    root.TryGetProperty("command", out var commandElement))
+                if (root.TryGetProperty("kind", out var kindElement))
                 {
-                    var command = commandElement.Deserialize(AgentJsonContext.Default.AgentCommand);
-                    if (command is not null) await processor.AcceptAsync(command, cancellationToken);
+                    switch (kindElement.GetString())
+                    {
+                        case "command" when root.TryGetProperty("command", out var commandElement):
+                            var command = commandElement.Deserialize(AgentJsonContext.Default.AgentCommand);
+                            if (command is not null) await processor.AcceptAsync(command, cancellationToken);
+                            break;
+                        case "terminal-open":
+                            terminalManager.HandleOpen(root, cancellationToken);
+                            break;
+                        case "file-open":
+                            fileManager.HandleOpen(root, cancellationToken);
+                            break;
+                    }
                 }
             }
             message.SetLength(0);

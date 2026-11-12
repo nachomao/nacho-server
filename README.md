@@ -224,6 +224,14 @@ napl uninstall purge                # 确认后彻底删除
 | GET/PUT | `/settings` | 系统设置读写 |
 | GET/POST/PUT/DELETE | `/install-profiles[/:id]` | 安装档案、默认档案与乐观锁更新 |
 | GET/POST | `/install-profiles/:id/revisions[...]` | 安装档案历史与恢复 |
+| POST | `/terminal/sessions` | 创建 WebSSH 终端会话（一次性 ticket） |
+| POST | `/terminal/sessions/:id/reconnect` | 重新签发终端 ticket（面板重连） |
+| DELETE | `/terminal/sessions/:id` | 结束终端会话 |
+| GET | `/terminal/sessions` | 终端会话审计列表 |
+| POST | `/clients/:id/files/sessions` | 创建 WebSSH 文件会话 |
+| POST | `/files/sessions/:id/reconnect` | 重新签发文件会话 ticket |
+| DELETE | `/files/sessions/:id` | 结束文件会话 |
+| GET | `/files/sessions` | 文件会话审计列表 |
 
 计划任务的 `daily` / `weekly` / `cron` 触发器由服务端调度器自动下发：`timezone` 使用 IANA 时区名（缺省 `UTC`），任务记录会返回 `nextRunAt`、`lastRunAt`、`lastStatus` 与 `lastError`。调度运行单独记录在 `task_runs`，服务重启后只补齐一次错过排期，按运行 ID 复用已创建命令避免重复投递；下发异常自动重试最多 3 次。`logon` / `startup` / `boot` 属于客户端事件触发，不参与服务端定时排期。
 
@@ -237,6 +245,8 @@ napl uninstall purge                # 确认后彻底删除
 | POST | `/commands/:id/report` | 令牌 | 上报指令执行结果 |
 | POST | `/findings` | 令牌 | 上报健康发现 |
 | WS | `/agent/ws?token=<token>` | 令牌 | 长连接，实时接收下发指令 |
+| WS | `/agent/terminal?session=&ticket=` | 令牌 | WebSSH 终端会话通道 |
+| WS | `/agent/files?session=&ticket=` | 令牌 | WebSSH 文件传输通道 |
 
 健康中心复用 `collect-logs` 的 512 KiB 结构化结果上限。服务端把结果原子归档为 JSON，保存字节数和 SHA-256，
 然后分析电源、磁盘、应用崩溃、服务、网络和 Agent 自身错误；相同事件按指纹合并，每个日志包最多生成 100 项发现。
@@ -253,6 +263,20 @@ Windows Agent 安装与制品接口：
 | POST | `/agent/commands/:id/ack` | 客户端持久化指令后的确认接口 |
 
 WebSocket 同时接受 `Authorization: Bearer <token>` 与旧版 query token；新客户端使用 Authorization 头。
+
+## WebSSH 终端与文件传输
+
+仅支持已建立实时通道的 Windows Agent。面板先调用 Panel API 创建会话并取得一次性 ticket，再打开浏览器 WebSocket；
+服务端通过 Agent 主通道下发 `terminal-open` / `file-open`，Agent 以设备令牌接入独立会话通道，服务端双向转发。
+设备令牌与面板 Key 不会进入浏览器 URL。
+
+- 终端：`/agent/terminal` 与 `/api/panel/terminal/ws`。持久 PowerShell/CMD 行会话，支持窗口尺寸、面板断线重连（128 KiB 回放缓冲）、
+  输出上限（Agent 4 MiB、服务端 8 MiB）、空闲 15 分钟与最长 60 分钟。单客户端同时 1 个终端会话，全局最多 8 个。
+- 文件：`/agent/files` 与 `/api/panel/files/ws`。支持驱动器/目录浏览、删除与分块传输；分块 256 KiB，逐块 SHA-256 校验；
+  上传按 `receivedBytes` 断点续传，下载可按偏移续传；单文件上限 512 MiB。
+- 审计：终端与文件会话分别记录到 `terminal_sessions` / `file_sessions`，关闭时写入原因、输入/输出或上/下行字节数；
+  日志来源为 `terminal`，不记录终端内容与文件正文。
+- 本地策略：未设置 `disableAllPolicies` 时，终端仍受 Agent 的 `allowCmdExecution` / `allowPowerShellExecution` 约束。
 
 ---
 

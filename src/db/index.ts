@@ -257,6 +257,37 @@ export function initSchema() {
     );
     CREATE INDEX IF NOT EXISTS idx_install_profile_revisions_profile
       ON install_profile_revisions(profile_id, revision DESC);
+
+    CREATE TABLE IF NOT EXISTS terminal_sessions (
+      id           TEXT PRIMARY KEY,
+      client_id    TEXT NOT NULL,
+      shell        TEXT NOT NULL DEFAULT 'powershell',
+      status       TEXT NOT NULL DEFAULT 'starting',
+      cols         INTEGER NOT NULL,
+      rows         INTEGER NOT NULL,
+      input_bytes  INTEGER NOT NULL DEFAULT 0,
+      output_bytes INTEGER NOT NULL DEFAULT 0,
+      close_reason TEXT,
+      error        TEXT,
+      created_at   INTEGER NOT NULL,
+      started_at   INTEGER,
+      ended_at     INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_terminal_sessions_client ON terminal_sessions(client_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS file_sessions (
+      id             TEXT PRIMARY KEY,
+      client_id      TEXT NOT NULL,
+      status         TEXT NOT NULL DEFAULT 'starting',
+      upload_bytes   INTEGER NOT NULL DEFAULT 0,
+      download_bytes INTEGER NOT NULL DEFAULT 0,
+      close_reason   TEXT,
+      error          TEXT,
+      created_at     INTEGER NOT NULL,
+      started_at     INTEGER,
+      ended_at       INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_file_sessions_client ON file_sessions(client_id, created_at DESC);
   `)
   // 旧库补列：CREATE TABLE IF NOT EXISTS 不会为已存在的表添加新字段
   ensureColumn("clients", "os_name", "TEXT NOT NULL DEFAULT ''")

@@ -14,9 +14,12 @@ import * as agentUpdates from "../services/agent-updates"
 import * as productUpdates from "../services/product-updates"
 import * as updateStaging from "../services/update-staging"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
+import { createTerminalSessionSchema } from "../schemas/webssh"
 import * as managedArtifacts from "../services/managed-artifacts"
 import * as installProfiles from "../services/install-profiles"
 import * as notifications from "../services/notifications"
+import * as fileSessions from "../services/file-sessions"
+import * as terminalSessions from "../services/terminal-sessions"
 import { healthCollectionSchema } from "../schemas/health"
 
 export const panelRouter = Router()
@@ -262,6 +265,72 @@ panelRouter.post(
       return fail(res, "打开网页仅支持当前在线的 Windows 客户端", 400)
     }
     return ok(res, commands.dispatchCommand({ clientId: c.id, type: body.type, payload: addServerCommandFields(body.type, body.payload) }), 201)
+  }),
+)
+
+/* ==================== WebSSH 终端与文件会话 ==================== */
+panelRouter.post(
+  "/terminal/sessions",
+  asyncHandler((req, res) => {
+    const body = parseBody(createTerminalSessionSchema, req.body)
+    const client = clients.getClient(body.clientId)
+    if (!client) return fail(res, "客户端不存在", 404)
+    return ok(res, terminalSessions.createTerminalSession(client, {
+      shell: body.shell ?? "powershell",
+      cols: body.cols ?? 120,
+      rows: body.rows ?? 30,
+    }), 201)
+  }),
+)
+
+panelRouter.post(
+  "/terminal/sessions/:id/reconnect",
+  asyncHandler((req, res) => ok(res, terminalSessions.reconnectTerminalSession(req.params.id))),
+)
+
+panelRouter.delete(
+  "/terminal/sessions/:id",
+  asyncHandler((req, res) => {
+    if (!terminalSessions.closeTerminalSession(req.params.id)) return fail(res, "终端会话不存在", 404)
+    return ok(res, { id: req.params.id, closed: true })
+  }),
+)
+
+panelRouter.get(
+  "/terminal/sessions",
+  asyncHandler((req, res) => {
+    const limit = Number(req.query.limit)
+    return ok(res, terminalSessions.listTerminalSessions(Number.isFinite(limit) ? limit : 50))
+  }),
+)
+
+panelRouter.post(
+  "/clients/:id/files/sessions",
+  asyncHandler((req, res) => {
+    const client = clients.getClient(req.params.id)
+    if (!client) return fail(res, "客户端不存在", 404)
+    return ok(res, fileSessions.createFileSession(client), 201)
+  }),
+)
+
+panelRouter.post(
+  "/files/sessions/:id/reconnect",
+  asyncHandler((req, res) => ok(res, fileSessions.reconnectFileSession(req.params.id))),
+)
+
+panelRouter.delete(
+  "/files/sessions/:id",
+  asyncHandler((req, res) => {
+    if (!fileSessions.closeFileSession(req.params.id)) return fail(res, "文件会话不存在", 404)
+    return ok(res, { id: req.params.id, closed: true })
+  }),
+)
+
+panelRouter.get(
+  "/files/sessions",
+  asyncHandler((req, res) => {
+    const limit = Number(req.query.limit)
+    return ok(res, fileSessions.listFileSessions(Number.isFinite(limit) ? limit : 50))
   }),
 )
 

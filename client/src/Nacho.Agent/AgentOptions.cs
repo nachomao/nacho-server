@@ -47,6 +47,7 @@ public sealed class AgentPaths(string dataDirectory)
     public string FileDeploymentsDirectory => Path.Combine(DataDirectory, "file-deployments");
     public string MessageIntentsDirectory => Path.Combine(DataDirectory, "message-intents");
     public string OpenUrlIntentsDirectory => Path.Combine(DataDirectory, "open-url-intents");
+    public string WebSshTransfersDirectory => Path.Combine(DataDirectory, "webssh-transfers");
     public string ProcessRestartsDirectory => Path.Combine(DataDirectory, "process-restarts");
     public string ProcessEfficiencyStateFile => Path.Combine(DataDirectory, "process-efficiency-state.json");
     public string MessagePushPolicyMigrationFile => Path.Combine(DataDirectory, "message-push-policy-v1.migrated.json");

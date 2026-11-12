@@ -227,3 +227,97 @@ test("卸载脚本按单元文件判断服务，避免 pipefail 下的 SIGPIPE �
   assert.ok(uninstall.includes('[ -f "/etc/systemd/system/${APP_NAME}.service" ]'))
   assert.match(uninstall, /systemctl daemon-reload/)
 })
+
+test("install.sh validates NACHO_UPDATE_ORIGIN and writes or backfills .env without overwriting existing values", () => {
+  assert.match(install, /NACHO_UPDATE_ORIGIN="\$\{NACHO_UPDATE_ORIGIN:-\}"/)
+  assert.match(install, /\^https:\/\/\[a-zA-Z0-9\.-\]\+\(:\\\[0-9\]\+\)\?\$|\^https:\/\/\[a-zA-Z0-9\.-\]\+\(\:\[0-9\]\+\)\?\$/)
+  assert.match(install, /validate_update_origin/)
+  assert.match(install, /env_file_set NACHO_UPDATE_ORIGIN/)
+
+  const bashCandidates = process.platform === "win32"
+    ? [
+        path.join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe"),
+        path.join(process.env.LOCALAPPDATA || "", "Programs", "Git", "bin", "bash.exe"),
+      ]
+    : ["bash"]
+  const bashBin = bashCandidates.find((candidate) => candidate === "bash" || fs.existsSync(candidate))
+  if (!bashBin) return
+
+  const toPosix = (filePath: string) => filePath.replaceAll("\\", "/")
+  const installScript = toPosix(path.join(deployDir, "install.sh"))
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nacho-install-env-"))
+  const runWriteEnv = (installDir: string, origin?: string) => {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      INSTALL_DIR: toPosix(installDir),
+      DATA_DIR: toPosix(path.join(installDir, "data")),
+      PANEL_API_KEY: "a".repeat(48),
+      ENROLLMENT_KEY: "b".repeat(48),
+    }
+    if (origin === undefined) delete env.NACHO_UPDATE_ORIGIN
+    else env.NACHO_UPDATE_ORIGIN = origin
+    return spawnSync(bashBin, ["-c", 'source "$1"; write_env', "_", installScript], {
+      cwd: repoDir,
+      encoding: "utf8",
+      env,
+    })
+  }
+
+  try {
+    // 1. 新建 .env：携带有效更新源（含末尾斜杠）时自动去斜杠并写入
+    const freshWithOrigin = path.join(root, "fresh-origin")
+    fs.mkdirSync(freshWithOrigin, { recursive: true })
+    const res1 = runWriteEnv(freshWithOrigin, "https://maojiu.cc/")
+    assert.equal(res1.status, 0, res1.stderr)
+    const env1 = fs.readFileSync(path.join(freshWithOrigin, ".env"), "utf8")
+    assert.match(env1, /^NACHO_UPDATE_ORIGIN=https:\/\/maojiu\.cc$/m)
+
+    // 2. 新建 .env：未提供或为空时不注入 NACHO_UPDATE_ORIGIN
+    const freshEmpty = path.join(root, "fresh-empty")
+    fs.mkdirSync(freshEmpty, { recursive: true })
+    const res2 = runWriteEnv(freshEmpty, "")
+    assert.equal(res2.status, 0, res2.stderr)
+    const env2 = fs.readFileSync(path.join(freshEmpty, ".env"), "utf8")
+    assert.doesNotMatch(env2, /^NACHO_UPDATE_ORIGIN=/m)
+
+    // 3. 已有 .env 缺失 NACHO_UPDATE_ORIGIN：保留原有配置并回填 NACHO_UPDATE_ORIGIN
+    const existingMissing = path.join(root, "existing-missing")
+    fs.mkdirSync(existingMissing, { recursive: true })
+    fs.writeFileSync(
+      path.join(existingMissing, ".env"),
+      "PORT=8443\nPANEL_API_KEY=existing-panel-key\nENROLLMENT_KEY=existing-enrollment-key\n",
+      "utf8",
+    )
+    const res3 = runWriteEnv(existingMissing, "https://maojiu.cc:8443/")
+    assert.equal(res3.status, 0, res3.stderr)
+    const env3 = fs.readFileSync(path.join(existingMissing, ".env"), "utf8")
+    assert.match(env3, /^PANEL_API_KEY=existing-panel-key$/m)
+    assert.match(env3, /^ENROLLMENT_KEY=existing-enrollment-key$/m)
+    assert.match(env3, /^NACHO_UPDATE_ORIGIN=https:\/\/maojiu\.cc:8443$/m)
+
+    // 4. 已有 .env 已配置非空 NACHO_UPDATE_ORIGIN：不得覆盖已有非空值
+    const res4 = runWriteEnv(existingMissing, "https://other.example.com")
+    assert.equal(res4.status, 0, res4.stderr)
+    const env4 = fs.readFileSync(path.join(existingMissing, ".env"), "utf8")
+    assert.match(env4, /^NACHO_UPDATE_ORIGIN=https:\/\/maojiu\.cc:8443$/m)
+    assert.doesNotMatch(env4, /other\.example\.com/)
+
+    // 5. 非法 NACHO_UPDATE_ORIGIN 明确报错且不污染 .env
+    for (const bad of [
+      "http://maojiu.cc",
+      "https://maojiu.cc/path",
+      "https://updates.example.invalid",
+      "https://bad;id",
+      "/",
+    ]) {
+      const badDir = path.join(root, `bad-${ Buffer.from(bad).toString("hex").slice(0, 8) }`)
+      fs.mkdirSync(badDir, { recursive: true })
+      const badRes = runWriteEnv(badDir, bad)
+      assert.notEqual(badRes.status, 0, `期望非法 origin 失败：${bad}`)
+      assert.match(badRes.stderr, /NACHO_UPDATE_ORIGIN 无效/)
+      assert.equal(fs.existsSync(path.join(badDir, ".env")), false)
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

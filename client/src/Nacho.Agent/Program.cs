@@ -94,6 +94,8 @@ builder.Services.AddSingleton<IMessageClock, SystemMessageClock>();
 builder.Services.AddSingleton<MessagePushManager>();
 builder.Services.AddSingleton<IUserProcessLauncher, WindowsUserProcessLauncher>();
 builder.Services.AddSingleton<OpenUrlManager>();
+builder.Services.AddSingleton<TerminalSessionManager>();
+builder.Services.AddSingleton<FileSessionManager>();
 builder.Services.AddSingleton<AgentApiClient>();
 builder.Services.AddSingleton<CommandProcessor>();
 builder.Services.AddSingleton<AgentUpdater>();

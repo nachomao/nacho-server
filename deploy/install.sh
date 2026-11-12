@@ -30,6 +30,7 @@ OFFLINE_THRESHOLD="${OFFLINE_THRESHOLD:-90}"
 ALLOW_OPEN_ENROLLMENT="${ALLOW_OPEN_ENROLLMENT:-true}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 TRUST_PROXY="${TRUST_PROXY:-false}"
+NACHO_UPDATE_ORIGIN="${NACHO_UPDATE_ORIGIN:-}"
 
 # 密钥：未提供则生成随机值
 PANEL_API_KEY="${PANEL_API_KEY:-}"
@@ -42,6 +43,24 @@ SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 log()  { printf '\033[1;32m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 err()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
+
+validate_update_origin() {
+  if [ -z "${NACHO_UPDATE_ORIGIN:-}" ]; then
+    NACHO_UPDATE_ORIGIN=""
+    return 0
+  fi
+  while [ "${NACHO_UPDATE_ORIGIN%/}" != "${NACHO_UPDATE_ORIGIN}" ]; do
+    NACHO_UPDATE_ORIGIN="${NACHO_UPDATE_ORIGIN%/}"
+  done
+  if [[ ! "${NACHO_UPDATE_ORIGIN}" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?$ ]] || [ "${NACHO_UPDATE_ORIGIN}" = "https://updates.example.invalid" ]; then
+    err "NACHO_UPDATE_ORIGIN 无效（须为 https://域名[:端口]）：${NACHO_UPDATE_ORIGIN}"
+    return 1
+  fi
+}
+
+if [ -n "${NACHO_UPDATE_ORIGIN}" ]; then
+  validate_update_origin
+fi
 
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -168,10 +187,51 @@ deploy_code() {
 # ---------------------------------------------------------------------------
 # 生成 .env
 # ---------------------------------------------------------------------------
+env_file_get() {
+  local key="$1" file="${INSTALL_DIR}/.env"
+  [ -f "$file" ] || return 0
+  awk -v key="$key" '
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", $0)
+      sub("[[:space:]]+$", "", $0)
+      print $0
+      exit
+    }
+  ' "$file"
+}
+
+env_file_set() {
+  local key="$1" value="$2" file="${INSTALL_DIR}/.env" temp
+  [ -f "$file" ] || return 1
+  temp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
+  awk -v key="$key" -v value="$value" '
+    BEGIN { replaced = 0 }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      print key "=" value
+      replaced = 1
+      next
+    }
+    { print }
+    END { if (!replaced) print key "=" value }
+  ' "$file" >"$temp" || { rm -f "$temp"; return 1; }
+  chmod 640 "$temp"
+  if [ "$(uname -s 2>/dev/null || true)" = "Linux" ]; then
+    chown --reference="$file" "$temp" 2>/dev/null || { rm -f "$temp"; return 1; }
+  else
+    chown --reference="$file" "$temp" 2>/dev/null || true
+  fi
+  mv -f "$temp" "$file"
+}
+
 write_env() {
+  validate_update_origin
   local env_file="${INSTALL_DIR}/.env"
   if [ -f "${env_file}" ]; then
     warn ".env 已存在，保留现有配置：${env_file}"
+    if [ -n "${NACHO_UPDATE_ORIGIN}" ] && [ -z "$(env_file_get NACHO_UPDATE_ORIGIN)" ]; then
+      env_file_set NACHO_UPDATE_ORIGIN "${NACHO_UPDATE_ORIGIN}"
+      log "已向现有 .env 补充 NACHO_UPDATE_ORIGIN"
+    fi
     return
   fi
   [ -z "${PANEL_API_KEY}" ] && PANEL_API_KEY="$(gen_key)"
@@ -191,6 +251,9 @@ PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 TRUST_PROXY=${TRUST_PROXY}
 ARTIFACTS_PATH=${INSTALL_DIR}/artifacts
 EOF
+  if [ -n "${NACHO_UPDATE_ORIGIN}" ]; then
+    printf 'NACHO_UPDATE_ORIGIN=%s\n' "${NACHO_UPDATE_ORIGIN}" >> "${env_file}"
+  fi
   chmod 640 "${env_file}"
 }
 
@@ -303,38 +366,6 @@ open_firewall() {
   fi
 }
 
-env_file_get() {
-  local key="$1" file="${INSTALL_DIR}/.env"
-  [ -f "$file" ] || return 0
-  awk -v key="$key" '
-    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-      sub("^[[:space:]]*" key "[[:space:]]*=[[:space:]]*", "", $0)
-      sub("[[:space:]]+$", "", $0)
-      print $0
-      exit
-    }
-  ' "$file"
-}
-
-env_file_set() {
-  local key="$1" value="$2" file="${INSTALL_DIR}/.env" temp
-  [ -f "$file" ] || return 1
-  temp="$(mktemp "${file}.tmp.XXXXXX")" || return 1
-  awk -v key="$key" -v value="$value" '
-    BEGIN { replaced = 0 }
-    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-      print key "=" value
-      replaced = 1
-      next
-    }
-    { print }
-    END { if (!replaced) print key "=" value }
-  ' "$file" >"$temp" || { rm -f "$temp"; return 1; }
-  chmod 640 "$temp"
-  chown --reference="$file" "$temp" 2>/dev/null || { rm -f "$temp"; return 1; }
-  mv -f "$temp" "$file"
-}
-
 summary() {
   local ip listen_host host port base url once shown hide_keys=0 hide_url=0 one_time=0
   local panel_key enrollment_key
@@ -412,6 +443,7 @@ summary() {
 }
 
 main() {
+  validate_update_origin
   require_root
   detect_os
   install_node

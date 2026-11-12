@@ -1,11 +1,15 @@
 import { db } from "../db"
 import { shortId } from "../lib/ids"
+import { logger } from "../lib/logger"
 import type { LogEntry, LogLevel } from "../types"
+import { archiveLogs } from "./log-archive"
 import { getGeneralSettings } from "./settings"
 
 const MIN_LOG_RETENTION_MAX = 1000
 const MAX_LOG_RETENTION_MAX = 1_000_000
 const RETENTION_SWEEP_INTERVAL_MS = 60 * 60_000
+/** 单次清理最多归档的记录数，避免一次性把大量日志读入内存。 */
+const MAX_ARCHIVE_BATCH = 5000
 let lastRetentionSweep = 0
 
 function retentionMax(): number {
@@ -22,13 +26,31 @@ function trimExcessLogs(): number {
   return Number(db.prepare("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts ASC LIMIT ?)").run(overflow).changes)
 }
 
+/** 归档并删除超过保留天数的日志；归档失败时保留数据，等待下次清理重试。 */
+function archiveExpiredLogs(cutoff: number, now: number): number {
+  const rows = db
+    .prepare("SELECT * FROM logs WHERE ts < ? ORDER BY ts ASC LIMIT ?")
+    .all(cutoff, MAX_ARCHIVE_BATCH) as LogRow[]
+  if (rows.length === 0) return 0
+  if (getGeneralSettings().compressArchive) {
+    try {
+      archiveLogs(rows.map(mapLog), { now })
+    } catch (error) {
+      logger.warn("日志归档失败，已保留待清理日志：", error)
+      return 0
+    }
+  }
+  const placeholders = rows.map(() => "?").join(",")
+  return Number(
+    db.prepare(`DELETE FROM logs WHERE id IN (${placeholders})`).run(...rows.map((row) => row.id)).changes,
+  )
+}
+
 /** 按保留天数与条目上限清理日志；天数为 0 时只按条目上限裁剪。 */
 export function sweepLogRetention(now = Date.now()): number {
   const days = getGeneralSettings().logRetentionDays
   let removed = 0
-  if (days > 0) {
-    removed += Number(db.prepare("DELETE FROM logs WHERE ts < ?").run(now - days * 86_400_000).changes)
-  }
+  if (days > 0) removed += archiveExpiredLogs(now - days * 86_400_000, now)
   removed += trimExcessLogs()
   lastRetentionSweep = now
   return removed
