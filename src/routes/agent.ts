@@ -2,6 +2,8 @@ import type { Request } from "express"
 import { Router } from "express"
 import { z } from "zod"
 import { agentAuth, canEnroll } from "../lib/auth"
+import { resolveClientIp } from "../lib/client-ip"
+import { config } from "../config"
 import { asyncHandler, fail, ok, parseBody } from "../lib/http"
 import { logger } from "../lib/logger"
 import * as clients from "../services/clients"
@@ -15,10 +17,16 @@ import { checkEnrollmentAttempt } from "../services/enrollment-guard"
 
 export const agentRouter = Router()
 
+/**
+ * 客户端地址：仅在 TRUST_PROXY 开启且直连对端是可信代理（回环/私有网段）时解析转发链，
+ * 取链中最靠近本机一侧的第一个非代理地址，避免伪造 X-Forwarded-For 绕过注册限流。
+ */
 function clientIp(req: Request): string {
-  const fwd = req.header("x-forwarded-for")
-  if (fwd) return fwd.split(",")[0].trim()
-  return req.socket.remoteAddress || ""
+  return resolveClientIp({
+    remoteAddress: req.socket.remoteAddress,
+    forwardedFor: req.header("x-forwarded-for"),
+    trustProxy: config.trustProxy,
+  })
 }
 
 /* -------------------- 注册（凭入网密钥，无需令牌） -------------------- */
