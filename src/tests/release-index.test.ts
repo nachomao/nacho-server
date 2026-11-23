@@ -3,8 +3,10 @@ import fs from "node:fs"
 import path from "node:path"
 import { generateKeyPairSync, sign } from "node:crypto"
 import { after, before, test } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-release-index-test.db")
+const workspace = createTestWorkspace("nacho-release-index-test")
+const databasePath = workspace.databasePath
 process.env.DATABASE_PATH = databasePath
 delete process.env.NACHO_UPDATE_ORIGIN
 
@@ -25,6 +27,7 @@ after(() => {
   fs.rmSync(databasePath, { force: true })
   fs.rmSync(`${databasePath}-shm`, { force: true })
   fs.rmSync(`${databasePath}-wal`, { force: true })
+  workspace.cleanup()
 })
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519")

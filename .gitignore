@@ -17,6 +17,10 @@ data/
 tmp-*.db*
 tmp-script-check/
 
+# 日志归档兜底：测试已把 DATABASE_PATH 指向系统临时目录（见 src/tests/test-workspace.ts），
+# 这里只拦住手工在仓库根运行服务端时产生的 log-archives/。
+log-archives/
+
 # 发布制品：artifacts/windows 只保留 latest.json 指向的那一个当前版本 exe
 # （约 72 MB，由 client/deploy/publish.ps1 生成并在发布时自动清理旧版本）。
 # 这条规则拦住误提交的过期 exe；当前版本用 git add -f 纳入，

@@ -5,8 +5,10 @@ import path from "node:path"
 import express from "express"
 import type http from "node:http"
 import { after, before, beforeEach, test } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-release-index-origin-test.db")
+const workspace = createTestWorkspace("nacho-release-index-origin-test")
+const databasePath = workspace.databasePath
 process.env.DATABASE_PATH = databasePath
 process.env.NACHO_UPDATE_ORIGIN = "https://env.example.test"
 
@@ -115,6 +117,7 @@ after(async () => {
   fs.rmSync(`${databasePath}-shm`, { force: true })
   fs.rmSync(`${databasePath}-wal`, { force: true })
   fs.rmSync(cacheFile(), { force: true })
+  workspace.cleanup()
 })
 
 const headers = () => ({ Authorization: `Bearer ${config.panelApiKey}`, "Content-Type": "application/json" })

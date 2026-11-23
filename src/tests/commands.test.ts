@@ -7,8 +7,10 @@ import type http from "node:http"
 import { DatabaseSync } from "node:sqlite"
 import { after, before, test } from "node:test"
 import { addServerCommandFields, batchCommandSchema, commandSupportsClient, panelCommandSchema } from "../schemas/commands"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-command-test.db")
+const workspace = createTestWorkspace("nacho-command-test")
+const databasePath = workspace.databasePath
 let db: typeof import("../db").db
 let initSchema: typeof import("../db").initSchema
 let clients: typeof import("../services/clients")
@@ -21,7 +23,7 @@ let agentRouter: typeof import("../routes/agent").agentRouter
 let logs: typeof import("../services/logs")
 let settings: typeof import("../services/settings")
 let enrollmentGuard: typeof import("../services/enrollment-guard")
-const artifactsPath = path.join(process.cwd(), "tmp-update-artifacts")
+const artifactsPath = workspace.artifactsPath
 
 before(async () => {
   fs.rmSync(databasePath, { force: true })
@@ -296,6 +298,7 @@ after(() => {
   db.close()
   fs.rmSync(databasePath, { force: true })
   fs.rmSync(artifactsPath, { force: true, recursive: true })
+  workspace.cleanup()
 })
 
 test("strict versions, heartbeat version updates, offline queueing, and active update deduplication", () => {

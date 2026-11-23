@@ -3,9 +3,11 @@ import fs from "node:fs"
 import path from "node:path"
 import { Readable } from "node:stream"
 import test, { after, before, beforeEach } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-managed-artifacts-test.db")
-const artifactsPath = path.join(process.cwd(), "tmp-managed-artifacts")
+const workspace = createTestWorkspace("nacho-managed-artifacts-test")
+const databasePath = workspace.databasePath
+const artifactsPath = workspace.artifactsPath
 process.env.DATABASE_PATH = databasePath
 process.env.ARTIFACTS_PATH = artifactsPath
 process.env.OFFLINE_THRESHOLD = "60"
@@ -41,6 +43,7 @@ after(() => {
   fs.rmSync(`${databasePath}-shm`, { force: true })
   fs.rmSync(`${databasePath}-wal`, { force: true })
   fs.rmSync(artifactsPath, { recursive: true, force: true })
+  workspace.cleanup()
 })
 
 function draft(fileName = "fixture.exe", content = Buffer.from("fixture-package")) {

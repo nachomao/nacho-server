@@ -2,8 +2,10 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import path from "node:path"
 import { after, before, test } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-task-scheduler-test.db")
+const workspace = createTestWorkspace("nacho-task-scheduler-test")
+const databasePath = workspace.databasePath
 
 let db: typeof import("../db").db
 let initSchema: typeof import("../db").initSchema
@@ -27,6 +29,7 @@ before(async () => {
 after(() => {
   db.close()
   fs.rmSync(databasePath, { force: true })
+  workspace.cleanup()
 })
 
 function reset() {

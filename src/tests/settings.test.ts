@@ -4,8 +4,10 @@ import path from "node:path"
 import express from "express"
 import type http from "node:http"
 import { after, before, beforeEach, test } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-settings-test.db")
+const workspace = createTestWorkspace("nacho-settings-test")
+const databasePath = workspace.databasePath
 process.env.DATABASE_PATH = databasePath
 process.env.LOG_RETENTION_MAX = "1234"
 process.env.OFFLINE_THRESHOLD = "45"
@@ -52,6 +54,7 @@ after(async () => {
   fs.rmSync(databasePath, { force: true })
   fs.rmSync(`${databasePath}-shm`, { force: true })
   fs.rmSync(`${databasePath}-wal`, { force: true })
+  workspace.cleanup()
 })
 
 const headers = () => ({

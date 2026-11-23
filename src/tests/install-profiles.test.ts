@@ -4,8 +4,10 @@ import fs from "node:fs"
 import path from "node:path"
 import { after, before, test } from "node:test"
 import express from "express"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-install-profiles-test.db")
+const workspace = createTestWorkspace("nacho-install-profiles-test")
+const databasePath = workspace.databasePath
 let db: typeof import("../db").db
 let profiles: typeof import("../services/install-profiles")
 let renderInstallScript: typeof import("../services/install-script").renderInstallScript
@@ -24,6 +26,7 @@ before(async () => {
 after(() => {
   db.close()
   fs.rmSync(databasePath, { force: true })
+  workspace.cleanup()
 })
 
 test("default profile is created once and remains the only default", () => {

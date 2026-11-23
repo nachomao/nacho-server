@@ -3,8 +3,10 @@ import fs from "node:fs"
 import path from "node:path"
 import { generateKeyPairSync } from "node:crypto"
 import { after, before, beforeEach, test } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-release-index-unconfigured-test.db")
+const workspace = createTestWorkspace("nacho-release-index-unconfigured-test")
+const databasePath = workspace.databasePath
 process.env.DATABASE_PATH = databasePath
 delete process.env.NACHO_UPDATE_ORIGIN
 
@@ -44,6 +46,7 @@ after(() => {
   fs.rmSync(databasePath, { force: true })
   fs.rmSync(`${databasePath}-shm`, { force: true })
   fs.rmSync(`${databasePath}-wal`, { force: true })
+  workspace.cleanup()
 })
 
 test("未配置更新源时 runtime-info 明确标记 none 且不请求占位地址", async () => {

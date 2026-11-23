@@ -6,8 +6,10 @@ import crypto from "node:crypto"
 import express from "express"
 import WebSocket from "ws"
 import { after, before, test } from "node:test"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-webssh-test.db")
+const workspace = createTestWorkspace("nacho-webssh-test")
+const databasePath = workspace.databasePath
 let db: typeof import("../db").db
 let server: http.Server
 let baseUrl: string
@@ -145,6 +147,7 @@ after(async () => {
   await delay(50)
   db.close()
   fs.rmSync(databasePath, { force: true })
+  workspace.cleanup()
 })
 
 test("terminal sessions relay input/output, clamp size, replay on reconnect and enforce limits", async () => {

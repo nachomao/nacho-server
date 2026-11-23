@@ -3,9 +3,11 @@ import fs from "node:fs"
 import path from "node:path"
 import test, { after, before, beforeEach } from "node:test"
 import { DatabaseSync } from "node:sqlite"
+import { createTestWorkspace } from "./test-workspace"
 
-const databasePath = path.join(process.cwd(), "tmp-health-test.db")
-const artifactsPath = path.join(process.cwd(), "tmp-health-artifacts")
+const workspace = createTestWorkspace("nacho-health-test")
+const databasePath = workspace.databasePath
+const artifactsPath = workspace.artifactsPath
 process.env.DATABASE_PATH = databasePath
 process.env.ARTIFACTS_PATH = artifactsPath
 process.env.LOG_RETENTION_MAX = "1000"
@@ -49,6 +51,7 @@ after(() => {
   fs.rmSync(`${databasePath}-shm`, { force: true })
   fs.rmSync(`${databasePath}-wal`, { force: true })
   fs.rmSync(artifactsPath, { force: true, recursive: true })
+  workspace.cleanup()
 })
 
 function collectionInput(clientIds: string[]) {
